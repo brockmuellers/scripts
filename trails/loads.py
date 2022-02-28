@@ -1,6 +1,7 @@
 import json
 import requests
 
+# month as zero-padded int, with first and last days
 months = [
         ['01', "{}-01-01", "{}-01-31"],
         ['02', "{}-02-01", "{}-02-28"], # update if leap year
@@ -17,7 +18,7 @@ months = [
     ]
 
 
-def load_recent(basepath: str) -> map:
+def load_recent_results(basepath: str) -> map:
     results = {}
     for month, start, end in months:
         with open(f'{basepath}/{month}.json', 'rb') as f:
@@ -47,50 +48,3 @@ def reload_results(year: int, basepath: str):
         with open(f'{basepath}/{month}.json', 'wb') as f:
             f.write(r.content)
             print(f"loaded month {month}")
-
-def load_divisions(reload: bool):
-    if reload:
-        url = " https://www.recreation.gov/api/permitcontent/233262"
-        headers = {
-            "TE": "trailers",
-            "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:91.0) Gecko/20100101 Firefox/91.0"
-        }
-        r = requests.get(url, headers=headers)
-        if r.status_code != 200:
-            raise Exception("failed to fetch divisions")
-
-        with open('inyo_divisions.json', 'wb') as f:
-            f.write(r.content)
-
-    # load the payload from file
-    # now init a Divisions class and return
-    payload = {}
-    with open('inyo_divisions.json', 'rb') as f:
-        payload = json.load(f)['payload']
-    division_arr = []
-    for key, val in payload['divisions'].items():
-        division_arr.append(Division(key, val['name']))
-
-    return Divisions(division_arr)
-
-class Divisions:
-    def __init__(self, divisions):
-        self.divisions = divisions
-
-    def name_by_id(self):
-        mapped = {}
-        for division in self.divisions:
-            mapped[division.id] = division.name
-        return mapped
-
-    def id_by_name(self):
-        mapped = {}
-        for division in self.divisions:
-            mapped[division.name] = division.id
-        return mapped
-
-
-class Division:
-    def __init__(self, id, name):
-        self.id = id
-        self.name = name
