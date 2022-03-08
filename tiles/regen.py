@@ -32,16 +32,18 @@ signature_suffix = "CloudFront-Signature="
 base_url = "https://heatmap-external-a.strava.com/tiles-auth/all/hot/{Z}/{X}/{Y}.png"
 
 @click.command()
-@click.option('--headers', help='Headers from which to extract keys.')
-def run(headers: str): 
+@click.option('--headers', help='Headers from which to extract keys (works to copy in firefox).')
+@click.option('--cookie', help='Cookie from which to extract keys (instead of parsing from headers list).')
+def run(headers: str, cookie: str):
 	print("------------------------------\nstarting search\n------------------------------")
-	# first parse headers from string
-	# split on /n, then select 
-	lines = headers.split("\n")
-	cookie = ""
-	for line in lines:
-		if line.startswith(cookie_suffix):
-			cookie = line.strip(cookie_suffix)
+
+	if cookie == None:
+		# first parse headers from string
+		# split on /n, then select cookie line
+		lines = headers.split("\n")
+		for line in lines:
+			if line.startswith(cookie_suffix):
+				cookie = line.strip(cookie_suffix)
 
 	cookie_vals = cookie.split("; ")
 	key_pair_id = ""
