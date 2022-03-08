@@ -16,6 +16,7 @@ def anniversary(results, trailhead, date, weekend_only):
 	backup_trailheads = [
 		# near bishop pass
 		"Baker and Green Lakes",
+		"Bishop Pass -South Lake",
 		"Treasure Lakes",
 		"Tyee Lakes",
 		# slight north, near sabrina lake
@@ -31,9 +32,9 @@ def anniversary(results, trailhead, date, weekend_only):
 		"2022-06-02",
 		"2022-06-03",
 		"2022-06-04",
-		"2022-06-09",
-		"2022-06-10",
-		"2022-06-11",
+		# "2022-06-09",
+		# "2022-06-10",
+		# "2022-06-11",
 		"2022-06-16",
 		"2022-06-17",
 		"2022-06-18",
@@ -44,8 +45,8 @@ def anniversary(results, trailhead, date, weekend_only):
 	best_dates = [
 		"2022-06-03",
 		"2022-06-04",
-		"2022-06-10",
-		"2022-06-11",
+		# "2022-06-10",
+		# "2022-06-11",
 		"2022-06-17",
 		"2022-06-18",
 		"2022-06-24",
