@@ -12,7 +12,10 @@ def raw(results, trailhead, date, weekend_only):
 	print(json.dumps(to_print, indent=4, sort_keys=True))
 
 def anniversary(results, trailhead, date, weekend_only):
-	trailhead = "Bishop Pass -South Lake"
+	trailheads = [
+		"Bishop Pass -South Lake",
+		"Sabrina Lake"
+	]
 	backup_trailheads = [
 		# near bishop pass
 		"Baker and Green Lakes",
@@ -21,7 +24,6 @@ def anniversary(results, trailhead, date, weekend_only):
 		"Tyee Lakes",
 		# slight north, near sabrina lake
 		"George Lake ",
-		"Sabrina Lake",
 		"Lamarck Lakes",
 		"Piute Pass",
 		# south
@@ -62,7 +64,7 @@ def anniversary(results, trailhead, date, weekend_only):
 	print(json.dumps(to_print1, indent=4, sort_keys=True))
 	print("---------------------")
 	# the ideal trailhead, with all dates
-	to_print = _print_filter(results, [trailhead], all_dates, weekend_only)
+	to_print = _print_filter(results, trailheads, all_dates, weekend_only)
 	print(json.dumps(to_print, indent=4, sort_keys=True))
 
 def _print_filter(results, trailheads, dates, weekend_only, only_available=False):
