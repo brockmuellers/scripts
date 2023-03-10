@@ -2,9 +2,12 @@ import click
 
 """
 to regenerate, go to www.strava.com/heatmap
+***you must login!***
 ctrl-shift-c to get to debug tools
 network tab
 right click on one of the "heatmap-external-*" requests, and copy request headers
+or, find the cookie itself and copy its contents
+paste results in single quotes
 
 Header format:
 
@@ -37,6 +40,12 @@ base_url = "https://heatmap-external-a.strava.com/tiles-auth/all/hot/{Z}/{X}/{Y}
 def run(headers: str, cookie: str):
 	print("------------------------------\nstarting search\n------------------------------")
 
+	if cookie == None and headers == None:
+		print("Please provide a cookie or request header.\n" + \
+			"You can find these at www.strava.com/heatmap when logged in to a strava account.\n" + \
+			"Copy values from one of the \"heatmap-external-*\" requests.")
+		return
+	
 	if cookie == None:
 		# first parse headers from string
 		# split on /n, then select cookie line
@@ -50,7 +59,7 @@ def run(headers: str, cookie: str):
 	policy = ""
 	signature = ""
 	for val in cookie_vals:
-		print(val)
+		#print(val)
 		if val.startswith(key_suffix):
 			key_pair_id = val[len(key_suffix):]
 		elif val.startswith(policy_suffix):
@@ -61,8 +70,9 @@ def run(headers: str, cookie: str):
 	if key_pair_id == "" or policy == "" or signature == "":
 		raise Exception("did not find cookie vals", key_pair_id, policy, signature)
 
-	print("Copy and paste this value into caltopo:")
-	print(f"{base_url}?Key-Pair-Id={key_pair_id}&Policy={policy}&Signature={signature}")
+	print("Create a custom map source in caltopo and save it to your account. You must regenerate this in ~14 days.")
+	print("--Type: Tile\n--Max Zoom: 15\n--Overlay: Transparent\n--URL Template:")
+	print(f"    {base_url}?Key-Pair-Id={key_pair_id}&Policy={policy}&Signature={signature}")
 	
 
 if __name__ == '__main__':
