@@ -23,19 +23,17 @@ months = [
 def load_recent_results(basepath: str) -> map:
     results = {}
     for month, start, end in months:
-        with open(f'{basepath}/inyo/{month}.json', 'rb') as f:
+        with open(f'{basepath}/{month}.json', 'rb') as f:
             r = json.load(f)
             results.update(r['payload'])
-        with open(f'{basepath}/ht/{month}.json', 'rb') as f:
+        with open(f'{basepath}/{month}.json', 'rb') as f:
             r = json.load(f)
             # todo payload is a map of dates to {trail_num: ..., trail_num:...}, so this needs to 
             # append the trails for each date to the existing ones (if they exist)
     return results
 
 
-def reload_results(year: int, basepath: str):
-    # for inyo
-    url = "https://www.recreation.gov/api/permitinyo/233262/availability"
+def reload_results(year: int, url: str, basepath: str):
     headers = {
         "TE": "trailers",
         "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:91.0) Gecko/20100101 Firefox/91.0"
@@ -52,34 +50,7 @@ def reload_results(year: int, basepath: str):
         if r.status_code != 200:
             raise Exception("failed to fetch month", month, r.status_code, r.content)
 
-
-        inyo_basepath = f'{basepath}/inyo'
-        if inyo_basepath not in glob.glob(f'{basepath}/*'):
-                os.makedirs(inyo_basepath)	
-        with open(f'{inyo_basepath}/{month}.json', 'wb') as f:
-            f.write(r.content)
-            print(f"loaded month {month}")
-
-
-    # for humboldt-toiyabe
-    url = "https://www.recreation.gov/api/permitinyo/445856/availability"
-
-    for month, start, end in months:
-        params = {
-            "start_date": start.format(year),
-            "end_date": end.format(year),
-            "commercial_acct": "false"
-        }
-
-        r = requests.get(url, params=params, headers=headers)
-        if r.status_code != 200:
-            raise Exception("failed to fetch month", month, r.status_code, r.content)
-
-
-        ht_basepath = f'{basepath}/ht'
-        if ht_basepath not in glob.glob(f'{basepath}/*'):
-                os.makedirs(ht_basepath)	
-        with open(f'{ht_basepath}/{month}.json', 'wb') as f:
+        with open(f'{basepath}/{month}.json', 'wb') as f:
             f.write(r.content)
             print(f"loaded month {month}")
 
