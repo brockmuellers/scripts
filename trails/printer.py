@@ -5,13 +5,13 @@ import loads
 
 
 class FilterParams:
-	def __init__(self, results, park, trailheads, dates, weekend_only, summer):
+	def __init__(self, results, park, trailheads, dates, months: list[int], weekend_only):
 		self.results = results
 		self.park = park
 		self.trailheads = trailheads
 		self.dates = dates
+		self.months = months
 		self.weekend_only = weekend_only
-		self.summer = summer
 
 def default(params: FilterParams):
 	raw(params)
@@ -20,8 +20,26 @@ def raw(params: FilterParams):
 	to_print = _print_filter(params, only_available=True)
 	print(json.dumps(to_print, indent=4, sort_keys=True))
 	
+def minarets(params: FilterParams):
+	params.months = [7, 8]
+	if params.park == "inyo":
+		params.trailheads = [
+			"Shadow Creek",
+			"River Trail",
+			"High Trail",
+			"Rush Creek", # safest choice for late season
+			"Minaret Lake",
+			"John Muir Trail North of Devils Postpile"
+		]
+	else:
+		return
+	
+	to_print = _print_filter(params, only_available=3)
+	print(json.dumps(to_print, indent=4, sort_keys=True))
+	
+
 def summer(params: FilterParams):
-	params.summer = True
+	params.months = [7, 8, 9]
 	
 	if params.park == "inyo":
 		params.trailheads = [
@@ -32,31 +50,54 @@ def summer(params: FilterParams):
 			"Shadow Creek",
 			"River Trail",
 			"High Trail",
-			"Rush Creek",
+			"Rush Creek", # safest choice for late season
 			"Minaret Lake",
+			"John Muir Trail North of Devils Postpile",
 			# leads to royce lakes
 			"Pine Creek",
 			# goes up from rock creek past ruby lake to pioneer basin
 			"Mono Pass",
 			# late season only! river crossing
-			"Convict Creek"
+			"Convict Creek",
+			"Little Lakes Valley", # easy and pretty
+			"Kearsage Pass", # some cool pinnacles, pretty far south
 		]
+		
 	elif params.park == "yosemite":
 		params.trailheads = [
 			# for grand canyon -> waterwheel
 			"White Wolf->Pate Valley",
 			"Glen Aulin->Cold Canyon/Waterwheel (pass through)"
 		]
+		
 	elif params.park == "humboldt_toiyabe":
 		params.trailheads = [
 			"Robinson Creek",
 			"Buckeye Creek",
 			"Virginia Lakes"
 		]
+		return # skip me until I've done more research
+		
 	elif params.park == "seki":
 		params.trailheads = [
-			"Sawtooth Pass"
+			# mineral king area
+			"Franklin",
+			"Sawtooth Pass",
+			"Timber Gap",
+			# mineral king area, short trail then xc
+			"Mosquito Lakes", 
+			"Eagle Lake", 
+			"White Chief",
+			# to lost lake, trail starts in jennie lakes wilderness?
+			"Sugarloaf",
+			# to mist falls
+			"Bubbs Creek",
+			# emerald/pear lakes area
+			"Lakes Trail",
+			"Lakes Trail Pass Through"
 		]
+		return # skip me until I've done more research
+		
 	else:
 		return
 
@@ -170,7 +211,6 @@ def _print_filter(params: FilterParams, only_available=0):
 	dates = params.dates
 	trailheads = params.trailheads
 	weekend_only = params.weekend_only
-	summer_only = params.summer
 
 	divs = divisions.load_divisions()
 	divs_by_name = divs.id_by_name()
@@ -182,8 +222,8 @@ def _print_filter(params: FilterParams, only_available=0):
 		should_print_date = dates == [None] or date_key in dates
 		if should_print_date and weekend_only:
 			should_print_date = date_is_weekend(date_key)
-		if should_print_date and summer_only:
-			should_print_date = date_is_summer(date_key)
+		if should_print_date and params.months != None:
+			should_print_date = date_in_months(date_key, params.months)
 
 		for trail_id, trail_vals in date_vals.items():
 			should_print_trail = trailheads == [None] or divs_by_id[trail_id] in trailheads
@@ -211,11 +251,10 @@ def time_key_to_weekday(key: str) -> str:
 # for entry dates F, S
 def date_is_weekend(key: str) -> bool:
 	return time_key_to_datetime(key).weekday() in [4, 5]
-
-# summer excludes june for now because this is a very snowy year
-def date_is_summer(key: str) -> bool:
-	return time_key_to_datetime(key).month in [7,8,9]
 	
+def date_in_months(key: str, months: list[int]) -> bool:
+	return time_key_to_datetime(key).month in months
+
 	
 	
 	

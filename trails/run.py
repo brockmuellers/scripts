@@ -54,14 +54,11 @@ def run(force_reload: bool, print_mode: str, trailhead: str, date: str, weekends
 
         print("\nRESULTS FOR PARK", park)
         printer_func = getattr(printer, print_mode)
-        params = printer.FilterParams(results, park, trailheads, dates, weekends, summer)
+        summer_months = [7, 8, 9] # exclude june because this is a snowy year
+        params = printer.FilterParams(results, park, trailheads, dates, weekends, summer_months)
         printer_func(params)
         print("\n")
-    
-# TODO: just need to get the bidirectional mappings, update the "pretty" files
-# see 	https://www.recreation.gov/api/permitcontent/445859
-# payload -> divisions -> name and id
-# or can those be loaded into memory?
+
 
 def park_url(park: str) -> str:
     if park == "inyo":
