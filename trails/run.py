@@ -6,6 +6,8 @@ import loads
 import printer
 import os
 
+# echo $'\nMINARETS' && python3 run.py --print_mode=minarets && echo $'\nSUMMER' && python3 run.py --print_mode=summer && echo $'\nLATE' && python3 run.py --print_mode=late_season
+
 YEAR = 2023
 PARKS = ["inyo", "humboldt_toiyabe", "yosemite", "sierra", "seki"]
 
@@ -15,9 +17,10 @@ PARKS = ["inyo", "humboldt_toiyabe", "yosemite", "sierra", "seki"]
 @click.option('--trailhead', default=None, help='Specific trailhead to load results for.')
 @click.option('--date', default=None, help='Specific date to load results for.')
 @click.option('--weekends', default=False, help='Only load results for weekend trips (Fri/Sat).')
-@click.option('--summer', default=False, help='Only load results for summer trips (june-sep).')
+@click.option('--month', default=0, help='Only load results for this month (int).')
 @click.option('--park', default=None, help='Load results for this park (inyo, ht==humboldt_toiyabe, yosemite, sierra, seki).')
-def run(force_reload: bool, print_mode: str, trailhead: str, date: str, weekends: bool, summer: bool, park: str): 
+def run(force_reload: bool, print_mode: str, trailhead: str, date: str, weekends: bool,
+ month: int, park: str): 
 
     # clean up params
     if park == "ht":
@@ -27,38 +30,51 @@ def run(force_reload: bool, print_mode: str, trailhead: str, date: str, weekends
         parks = [park]
     dates = [date]
     trailheads = [trailhead]
+    min_open = 0 # default minimum available spots
+    weekdays = None
+    if weekends:
+    	weekdays = [printer.FRI, printer.SAT]
+    
+    months = None
+    if month:
+        months = [month]
     	
+    # get info about trails
     if force_reload:
     	# this operates on all parks
         divisions.reload_divisions()
-
-    for park in parks:
         
-        # directory for results: ./results/{year of results}/{park name}/{date and hour results were pulled}
-        # results are stored as: {directory for results}/{month as int}.json
-        now_str = datetime.now().strftime("%Y-%m-%d-%H")
-        basepath_for_now = f'results/{YEAR}/{park}/{now_str}'
+    # reload trail availability if needed
+    # directory for results: ./results/{year of results}/{park name}/{date and hour results were pulled}
+    # results are stored as: {directory for results}/{month as int}.json
+    now = datetime.now()
+    for park in parks:
+        basepath = basepath_for_now(park, now)
 
         # if basepath doesn't exist (e.g. has not reloaded within the hour), reload
         reload_park = force_reload
-        if basepath_for_now not in glob.glob(f'results/{YEAR}/{park}/*'):
+        if basepath not in glob.glob(f'results/{YEAR}/{park}/*'):
             print("no results loaded within the last hour")
-            os.makedirs(basepath_for_now)
+            os.makedirs(basepath)
             reload_park = True
 
         if reload_park:
             print("reloading results for park", park)
-            loads.reload_results(YEAR, park_url(park), basepath_for_now)
+            loads.reload_results(YEAR, park_url(park), basepath)
 
-        results = loads.load_recent_results(basepath_for_now)
+    for park in parks:
+        basepath = basepath_for_now(park, now)
+        results = loads.load_recent_results(basepath)
 
-        print("\nRESULTS FOR PARK", park)
+        #print("\nRESULTS FOR PARK", park)
         printer_func = getattr(printer, print_mode)
-        summer_months = [7, 8, 9] # exclude june because this is a snowy year
-        params = printer.FilterParams(results, park, trailheads, dates, weekends, summer_months)
+        params = printer.FilterParams(results, park, trailheads, dates, months, weekdays, min_open)
         printer_func(params)
-        print("\n")
+        #print("\n")
 
+def basepath_for_now(park: str, now: datetime):
+    now_str = now.strftime("%Y-%m-%d-%H")
+    return f'results/{YEAR}/{park}/{now_str}'
 
 def park_url(park: str) -> str:
     if park == "inyo":
