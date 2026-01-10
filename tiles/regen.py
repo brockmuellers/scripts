@@ -1,6 +1,10 @@
 import click
 
 """
+IMPORTANT: DEPRECATED!
+It seems that strava now requires the cookies (maybe strava4_session specifically).
+So, we can use a cloudflare proxy instead.
+
 to regenerate, go to www.strava.com/heatmap
 ***you must login!***
 ctrl-shift-c to get to debug tools
