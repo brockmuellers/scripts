@@ -14,6 +14,11 @@
  * Example incoming URL: https://strava-proxy.brockmuellers-95e.workers.dev/14/2623/6332.png?secret={my_secret}
  * So URL template is: https://strava-proxy.brockmuellers-95e.workers.dev/{Z}/{X}/{Y}.png?secret={my_secret}
  */
+ 
+// 00000000 = Fully transparent background
+// FF0000 = Solid Red text
+const EXPIRED_TILE_URL = "https://placehold.co/256x256/00000000/FF0000?text=UPDATE+STRAVA+COOKIES";
+const COLOR = "hot"
 
 export default {
   async fetch(request, env, ctx) {
@@ -29,7 +34,7 @@ export default {
     
     const [_, z, x, y] = pathParts;
     
-    const stravaUrl = `https://content-a.strava.com/identified/globalheat/all/hot/${z}/${x}/${y}.png?v=19`;
+    const stravaUrl = `https://content-a.strava.com/identified/globalheat/all/${COLOR}/${z}/${x}/${y}.png?v=19`;
 
     const response = await fetch(stravaUrl, {
       method: 'GET',
@@ -40,6 +45,18 @@ export default {
         'Origin': 'https://www.strava.com'
       }
     });
+
+    // --- THE HEALTH CHECK ---
+    if (response.status === 401) {
+      console.error("Strava returned 401: Cookies likely expired.");
+
+      // Option A: Return a visual warning tile
+      return fetch(EXPIRED_TILE_URL);
+
+      // Option B: Fallback to the Public Heatmap (no street level, but better than nothing)
+      // const publicUrl = `https://content-a.strava.com/globalheat/all/${color}/${z}/${x}/${y}.png?v=19`;
+      // return fetch(publicUrl);
+    }
 
     // Return the image directly
     return response;
