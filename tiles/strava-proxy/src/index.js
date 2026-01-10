@@ -18,17 +18,24 @@
 // 00000000 = Fully transparent background
 // FF0000 = Solid Red text
 const EXPIRED_TILE_URL = "https://placehold.co/256x256/00000000/FF0000?text=UPDATE+STRAVA+COOKIES";
+// Other color options include blue
 const COLOR = "hot"
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     
+    // First check global Cloudflare cache, if available
+    // TODO: I have not validated that this works
+    const cache = caches.default;
+    let cacheResponse = await cache.match(request);
+    if (cacheResponse) return cacheResponse;
+    
+    // Authorization
     const secret = url.searchParams.get("secret");
     if (secret != env.MY_SECRET) return new Response("Unauthorized", { status: 401 });
     
     // Extract Z/X/Y from the incoming request
-    // Splitting with regex that matches '/' and '?'
     const pathParts = url.pathname.split("/");
     if (pathParts.length < 4) return new Response("Invalid Path", { status: 400 });
     
@@ -46,7 +53,7 @@ export default {
       }
     });
 
-    // --- THE HEALTH CHECK ---
+    // If 401, return a helpful tile
     if (response.status === 401) {
       console.error("Strava returned 401: Cookies likely expired.");
 
@@ -58,7 +65,22 @@ export default {
       // return fetch(publicUrl);
     }
 
-    // Return the image directly
-    return response;
+    // If there are any other errors, return before we get to caching
+    if (!response.ok) {
+      return response;
+    }
+
+    // Prepare for caching: create a new response to allow header modification
+    const newResponse = new Response(response.body, response);
+    
+    // s-maxage: 7 days for Cloudflare
+    // max-age: 1 hour for browser (so you don't get stuck with old data)
+    // Note: I don't know why this is necessary but AI insists that it is
+    newResponse.headers.set("Cache-Control", "s-maxage=604800, max-age=3600");
+
+    // Save to cache; clone because the body can only be read once
+    ctx.waitUntil(cache.put(request, newResponse.clone()));
+
+    return newResponse;
   }
 };
