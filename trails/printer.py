@@ -31,6 +31,7 @@ def default(params: FilterParams):
 def raw(params: FilterParams):
 	print_results(params)
 	
+	
 def minarets(params: FilterParams):
 	# trip with ross/wesley
 	params.months = [7, 8]
@@ -43,6 +44,16 @@ def minarets(params: FilterParams):
 			"High Trail",
 			"Rush Creek", # safest choice for late season
 			"Minaret Lake"
+		]
+	elif params.park == "sierra":
+		params.months = None
+		params.dates = [
+			"2023-07-12",
+			"2023-07-13",
+			"2023-07-14"
+		]
+		params.trailheads = [
+			"Mono Creek"
 		]
 	else:
 		return
@@ -71,7 +82,7 @@ def late_season(params: FilterParams):
 		params.trailheads = [
 			# south of palisades, north has more lakes+space, south is less crowded?
 			# at 7.7k', better in Oct, 10+ mi?
-			"Big Pine Creek North Fork", # (short/long oct)
+			"Big Pine Creek North Fork", # (short/long oct, most excited about this one)
 			"Big Pine Creek South Fork", # (short/long oct)
 			
 			# leads to royce lakes, 7.4k' so better in Oct, 17 mi
@@ -106,8 +117,17 @@ def late_season(params: FilterParams):
 		]
 		return # skip me until I've done more research, but these should be easy + nice aspens
 	elif params.park == "yosemite":
-		# find some good short late season hikes from tuolumne; is shorter drive than inyo
-		return
+		# find some good short late season hikes from tuolumne too?; is shorter drive than inyo
+		params.trailheads = [
+			# for grand canyon -> waterwheel; white wolf direction preferred, ~30 mi
+			# or could do short trip in from glen aulin
+			# 10/6 weekend?
+			"White Wolf->Pate Valley",
+			"Glen Aulin->Cold Canyon/Waterwheel (pass through)"
+		]
+
+		print_results(params, "late yosemite")
+		
 	elif params.park == "seki":
 		# permit season does end eventually, so maybe don't need to search for this?
 		return
@@ -144,8 +164,14 @@ def summer(params: FilterParams):
 	elif params.park == "yosemite":
 		params.trailheads = [
 			# for grand canyon -> waterwheel; white wolf direction preferred, ~30 mi
+			# could be cool perseids weekend, otherwise 10/6 weekend
 			"White Wolf->Pate Valley",
 			"Glen Aulin->Cold Canyon/Waterwheel (pass through)"
+			# all of these avoid dangerous creeks
+			"Lyell (No Donohue Pass)",
+			"Lyell Canyon (Donohue Pass Eligible)",
+			"Rafferty Creek->Vogelsang",
+			"Ten Lakes"
 		]
 		params.months = [7, 8]
 		
@@ -182,6 +208,31 @@ def summer(params: FilterParams):
 
 	print_results(params)
 	
+def fourthofjuly(params: FilterParams):
+	params.dates = [
+		"2023-07-01",
+		"2023-07-02",
+		"2023-07-03"
+	]
+	params.min_open = 3
+	
+	if params.park == "inyo":
+		params.trailheads = [
+			# these two are the best
+			"Big Pine Creek North Fork",
+			"Little Lakes Valley", 
+			# also nice
+			"Convict Creek",
+			"McGee Pass",
+			# maybe this would work?
+			#"Pine Creek", 
+			# some cool pinnacles, but pretty far south
+			#"Kearsage Pass",
+		]
+	else:
+		return
+	
+	print_results(params)
 
 def anniversary(params: FilterParams):
 	params.min_open = 2
@@ -235,11 +286,15 @@ def anniversary(params: FilterParams):
 			# seems very nice, lots of elevation gain, goes up from rock creek past ruby lake
 			"Mono Pass"
 		]
+		# actually I doubt any of these will work
+		return
 	elif params.park == "yosemite":
-		backup_trailheads = [
+		trailheads = [
 			# for grand canyon -> waterwheel; tioga road may not be open
-			"White Wolf->Pate Valley",
-			"Glen Aulin->Cold Canyon/Waterwheel (pass through)"
+			"Lyell (No Donohue Pass)",
+			"Lyell Canyon (Donohue Pass Eligible)",
+			"Rafferty Creek->Vogelsang",
+			"Ten Lakes"
 		]
 	elif params.park == "humboldt_toiyabe":
 		# also see robinson, buckeye, maybe virginia in humboldt-toiyabe
@@ -268,7 +323,8 @@ def anniversary(params: FilterParams):
 		print_results(params, "BEST " + params.park)
 	
 	# the ideal trailhead, with all dates
-	if len(trailheads) > 0:
+	#if len(trailheads) > 0:
+	if False:
 		params.trailheads = trailheads
 		params.dates = all_dates
 		print_results(params, "MORE DATES " + params.park)

@@ -6,8 +6,7 @@ import loads
 import printer
 import os
 
-# echo $'\nMINARETS' && python3 run.py --print_mode=minarets && echo $'\nSUMMER' && python3 run.py --print_mode=summer && echo $'\nLATE' && python3 run.py --print_mode=late_season
-
+# echo $'\nMINARETS' && python3 run.py --print_mode=minarets && echo $'\nSUMMER' && python3 run.py --print_mode=summer && echo $'\nLATE' && python3 run.py --print_mode=late_season && echo $'\nANNIVERSARY' && python3 run.py --print_mode=anniversary
 YEAR = 2023
 PARKS = ["inyo", "humboldt_toiyabe", "yosemite", "sierra", "seki"]
 
