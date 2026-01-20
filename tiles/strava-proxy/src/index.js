@@ -9,24 +9,26 @@
  *
  * Vibe coding win? More or less.
  * Deploy secret/cookies with: `npx wrangler secret bulk .env.production`, in this dir
- * (cookies e.g. _strava4_session=...; note that you need sometimes need to copy the raw value in firefox because it truncates values with a literal '...')
+ * (if expired get new cookies from global heatmap e.g. _strava4_session=...; note that you need sometimes need to copy the raw value in firefox because it truncates values with a literal '...')
  * Saved a secret key MY_SECRET that will come in with the request - it's some lazy auth.
  * Example incoming URL: https://strava-proxy.brockmuellers-95e.workers.dev/14/2623/6332.png?secret={my_secret}
- * So URL template is: https://strava-proxy.brockmuellers-95e.workers.dev/{Z}/{X}/{Y}.png?secret={my_secret}
+ * So URL template is: https://strava-proxy.brockmuellers-95e.workers.dev/{Z}/{X}/{Y}.png?secret={my_secret} (with `{my_secret}` populated)
+ * Can add 'mode' URL param with values 'xyz' (default) or 'tms' (changes coord handling)
+ *
+ * Handy response testing at https://trailbehind.github.io/TilejsonTester/
  */
 
 // 00000000 = Fully transparent background
 // FF0000 = Solid Red text
 const EXPIRED_TILE_URL = "https://placehold.co/256x256/00000000/FF0000?text=UPDATE+STRAVA+COOKIES";
 // Other color options include blue
-const COLOR = "hot"
+const COLOR = "hot";
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     // First check global Cloudflare cache, if available
-    // TODO: I have not validated that this works
     const cache = caches.default;
     let cacheResponse = await cache.match(request);
     if (cacheResponse) return cacheResponse;
@@ -35,11 +37,25 @@ export default {
     const secret = url.searchParams.get("secret");
     if (secret != env.MY_SECRET) return new Response("Unauthorized", { status: 401 });
 
-    // Extract Z/X/Y from the incoming request
-    const pathParts = url.pathname.split("/");
-    if (pathParts.length < 4) return new Response("Invalid Path", { status: 400 });
+    // Extract Z/X/Y from the incoming request; as strings
+    // (note that Y will have a .png extension, but it's fine in practice since we process it below)
+     const pathParts = url.pathname.split("/");
+    if (pathParts.length < 4) return new Response("Invalid Path", { status: 422 });
 
-    const [_, z, x, y] = pathParts;
+    const [_, zStr, xStr, yStr] = pathParts;
+    const z = parseInt(zStr, 10);
+    const x = parseInt(xStr, 10);
+    let y = parseInt(yStr, 10); // "56.png" becomes 56
+
+    // Support TMS in addition to default xyz mode
+    const mode = url.searchParams.get("mode");
+    if (mode == 'xyz' || mode == null) {
+        // No transform needed
+    } else if (mode == 'tms') {
+        y = Math.pow(2, z) - y - 1;
+    } else {
+        return new Response("Invalid Mode", { status: 422 });
+    }
 
     const stravaUrl = `https://content-a.strava.com/identified/globalheat/all/${COLOR}/${z}/${x}/${y}.png?v=19`;
 
