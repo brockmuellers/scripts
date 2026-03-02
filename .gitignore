@@ -1,3 +1,2 @@
 trails/results/*
 trails/__pycache__/*
-tiles/strava-proxy/.env.production
