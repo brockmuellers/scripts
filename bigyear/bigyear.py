@@ -12,9 +12,11 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 import webbrowser
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -36,6 +38,33 @@ API_BASE    = "https://api.ebird.org/v2"
 
 # ── HTTP + cache ────────────────────────────────────────────────────────────
 
+_progress_stack: list[dict] = []
+
+def _fetch_notify(url: str) -> None:
+    """Emit a fetch line. In a batch, updates a single line as X/N."""
+    if not _progress_stack:
+        click.echo(f"[fetch] {url}", err=True)
+        return
+    top = _progress_stack[-1]
+    top["current"] += 1
+    line = f"{top['current']}/{top['total']} [fetch] {url}"
+    if sys.stderr.isatty():
+        sys.stderr.write(f"\r\033[K{line}")
+        sys.stderr.flush()
+    else:
+        click.echo(line, err=True)
+
+@contextmanager
+def _fetch_batch(total: int):
+    _progress_stack.append({"total": total, "current": 0})
+    try:
+        yield
+    finally:
+        _progress_stack.pop()
+        if sys.stderr.isatty():
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
 def _cache_path(url: str) -> Path:
     return CACHE_DIR / (hashlib.sha1(url.encode()).hexdigest() + ".json")
 
@@ -53,7 +82,7 @@ def _cached_get(url: str, headers: dict | None = None,
         return json.loads(cached.read_text())
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     time.sleep(THROTTLE)
-    click.echo(f"[fetch] {url}", err=True)
+    _fetch_notify(url)
     resp = httpx.get(url, headers=headers or {}, cookies=cookies or {},
                      timeout=60, follow_redirects=True)
     if resp.status_code != 200:
@@ -114,7 +143,7 @@ def barchart_get(region: str, years_back: int = 5) -> dict[str, list[int]]:
         )
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     time.sleep(THROTTLE)
-    click.echo(f"[fetch] {url}", err=True)
+    _fetch_notify(url)
     resp = httpx.get(url, cookies={"EBIRD_SESSIONID": cookie},
                      timeout=60, follow_redirects=True)
     if resp.status_code != 200:
@@ -199,19 +228,20 @@ def fetch_recent(region: str, back: int) -> list[dict]:
         for code in sorted(submap, key=lambda c: submap[c]):
             click.echo(f"  {code}  {submap[code]}", err=True)
     all_obs: list[dict] = []
-    for r in shards:
-        obs = api_get(
-            f"/data/obs/{r}/recent",
-            {"back": back, "hotspot": "true",
-             "includeProvisional": "false", "maxResults": MAX_RESULTS},
-        )
-        if len(obs) >= MAX_RESULTS:
-            click.echo(
-                f"WARNING: {r} returned {len(obs)} rows (= maxResults) — "
-                f"data likely truncated. Try --back with a smaller value.",
-                err=True,
+    with _fetch_batch(len(shards)):
+        for r in shards:
+            obs = api_get(
+                f"/data/obs/{r}/recent",
+                {"back": back, "hotspot": "true",
+                 "includeProvisional": "false", "maxResults": MAX_RESULTS},
             )
-        all_obs.extend(obs)
+            if len(obs) >= MAX_RESULTS:
+                click.echo(
+                    f"WARNING: {r} returned {len(obs)} rows (= maxResults) — "
+                    f"data likely truncated. Try --back with a smaller value.",
+                    err=True,
+                )
+            all_obs.extend(obs)
     return all_obs
 
 def compute_targets(
@@ -258,15 +288,25 @@ def rank_hotspots(
             continue
         if require_codes is not None and require_codes.isdisjoint(spp):
             continue
+        last_match = ""
+        if require_codes is not None:
+            last_match = max(
+                (spp[c][0] for c in require_codes if c in spp), default="",
+            )
         rows.append({
             "locId": loc,
             "name": hs.get("locName", loc),
             "subregion": hs.get("subnational2Code") or hs.get("subnational1Code") or "?",
             "num_spp_all_time": nspp,
             "target_hits": len(spp),
+            "last_match": last_match,
             "targets": sorted(spp.items(), key=lambda kv: kv[1][0], reverse=True),
         })
-    rows.sort(key=lambda r: (-r["target_hits"], -r["num_spp_all_time"]))
+    if require_codes is not None:
+        rows.sort(key=lambda r: (r["last_match"], r["target_hits"],
+                                 r["num_spp_all_time"]), reverse=True)
+    else:
+        rows.sort(key=lambda r: (-r["target_hits"], -r["num_spp_all_time"]))
     return rows[:top_n]
 
 # ── shared setup ────────────────────────────────────────────────────────────
@@ -328,10 +368,17 @@ def _setup(regions: tuple[str, ...] | str, seen_list_arg: str | None) -> dict:
     name_to_code = {t["comName"]: t["speciesCode"]
                     for t in taxonomy if "speciesCode" in t and "comName" in t}
     code_to_name = {v: k for k, v in name_to_code.items()}
+    species_only = {t["speciesCode"] for t in taxonomy
+                    if t.get("category") == "species" and "speciesCode" in t}
     per_region: list[tuple[str, list[str]]] = []
     all_species: set[str] = set()
     for r in regions:
         spp = api_get(f"/product/spplist/{r}")
+        if not spp:
+            raise click.ClickException(
+                f"Region {r!r} returned 0 species — likely an invalid code."
+            )
+        spp = [c for c in spp if c in species_only]
         per_region.append((r, spp))
         all_species.update(spp)
     targets, unmatched = compute_targets(
@@ -406,7 +453,7 @@ def cli(refresh: bool) -> None:
                    "seen list; overrides MIN_HITS to 1.")
 def rank(regions: tuple[str, ...], seen_list_arg: str | None,
          back: int, top_n: int, species_query: str | None) -> None:
-    """Rank hotspots across one or more REGIONS by target-species presence."""
+    """Rank hotspots in REGIONS by target-species presence."""
     state = _setup(regions, seen_list_arg)
     _print_header(state)
     require_codes: set[str] | None = None
@@ -432,6 +479,17 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
                 seen_locs.add(h["locId"])
                 hotspots.append(h)
         recent.extend(fetch_recent(r, back))
+        if require_codes:
+            # /data/obs/{r}/recent dedupes to one row per species region-wide,
+            # so a species-filter needs the per-species endpoint to see every
+            # hotspot that had it recently.
+            with _fetch_batch(len(require_codes)):
+                for code in require_codes:
+                    recent.extend(api_get(
+                        f"/data/obs/{r}/recent/{code}",
+                        {"back": back, "hotspot": "true",
+                         "includeProvisional": "false"},
+                    ))
         subregions.update(subregion_map(r))
         leaving |= _leaving_codes(r)
     rows = rank_hotspots(
@@ -452,12 +510,19 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
             f"{r['locId']:<10}  {district} - {r['name']} [{r['subregion']}]"
         )
         for code, (obsdt, comname) in r["targets"]:
-            if code in leaving:
-                marker = click.style("!", fg="yellow", bold=True)
+            is_leaving = code in leaving
+            is_match = require_codes is not None and code in require_codes
+            if is_match:
+                name = click.style(comname, fg="magenta", bold=True)
+            elif is_leaving:
                 name = click.style(comname, fg="yellow", bold=True)
+            else:
+                name = comname
+            if is_leaving:
+                marker = click.style("!", fg="yellow", bold=True)
                 click.echo(f"                       {marker} - {name}  ({obsdt})")
             else:
-                click.echo(f"                         - {comname}  ({obsdt})")
+                click.echo(f"                         - {name}  ({obsdt})")
 
 @cli.command()
 @click.argument("region")
@@ -465,13 +530,33 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
               help="Path to eBird CSV of species you've already seen "
                    "(or set BIGYEAR_SEEN_LIST).")
 def targets(region: str, seen_list_arg: str | None) -> None:
-    """Print your remaining target species for REGION."""
+    """Print your remaining target species for REGION, ranked by frequency."""
     state = _setup(region, seen_list_arg)
     _print_header(state)
+    try:
+        bc = barchart_get(region)
+    except click.ClickException as e:
+        click.echo(f"(ranking alphabetically: {e.message})", err=True)
+        bc = {}
+    leaving = _leaving_codes(region)
+    def score(code: str) -> float:
+        bins = bc.get(code)
+        return sum(bins) / len(bins) if bins else 0.0
+    ranked = sorted(
+        state["targets"],
+        key=lambda c: (-score(c), state["code_to_name"].get(c, c)),
+    )
     click.echo("")
-    for code in sorted(state["targets"],
-                       key=lambda c: state["code_to_name"].get(c, c)):
-        click.echo(f"{code}\t{state['code_to_name'].get(code, '?')}")
+    click.echo(" Avg  Code       Species")
+    click.echo(" ---  ---------  -----------------")
+    for code in ranked:
+        name = state["code_to_name"].get(code, "?")
+        if code in leaving:
+            marker = click.style("!", fg="yellow", bold=True)
+            name = click.style(name, fg="yellow", bold=True)
+            click.echo(f" {score(code):>3.1f}  {code:<9} {marker} {name}")
+        else:
+            click.echo(f" {score(code):>3.1f}  {code:<9}   {name}")
 
 @cli.command()
 @click.argument("locid")
@@ -486,7 +571,7 @@ def targets(region: str, seen_list_arg: str | None) -> None:
                    "No 'Pct/N' — just the 0-9 bucket score.")
 def deepdive(locid: str, seen_list_arg: str | None,
              back: int, fast: bool) -> None:
-    """Show per-species checklist frequency at hotspot LOCID (e.g. L164544)."""
+    """Per-species checklist frequency at hotspot LOCID."""
     seen_path = _seen_list_path(seen_list_arg)
     seen_names, _ = load_seen_list(seen_path)
     taxonomy = api_get("/ref/taxonomy/ebird", {"fmt": "json"})
@@ -580,18 +665,19 @@ def deepdive(locid: str, seen_list_arg: str | None,
     now_bin = _current_bin()
 
     hits: dict[str, int] = defaultdict(int)
-    for c in in_window:
-        checklist = api_get(f"/product/checklist/view/{c['subId']}")
-        seen_in_this = set()
-        for o in checklist.get("obs", []) or []:
-            code = o.get("speciesCode")
-            if not code or code not in species_codes or code in seen_in_this:
-                continue
-            seen_in_this.add(code)
-            name = code_to_name.get(code, code)
-            if name in seen_names:
-                continue
-            hits[code] += 1
+    with _fetch_batch(len(in_window)):
+        for c in in_window:
+            checklist = api_get(f"/product/checklist/view/{c['subId']}")
+            seen_in_this = set()
+            for o in checklist.get("obs", []) or []:
+                code = o.get("speciesCode")
+                if not code or code not in species_codes or code in seen_in_this:
+                    continue
+                seen_in_this.add(code)
+                name = code_to_name.get(code, code)
+                if name in seen_names:
+                    continue
+                hits[code] += 1
 
     total = len(in_window)
     click.echo("")
@@ -682,11 +768,11 @@ def _mean_window(values: list[float], center: int, radius: int) -> float:
                    "Use a negative value to include steady/rising species.")
 def leaving(region: str, seen_list_arg: str | None,
             weeks_ahead: int, min_now: int, min_drop: float) -> None:
-    """Rank targets in REGION by 'here now, gone soon' — biggest bucket drop
-    between the current half-month and WEEKS-AHEAD from now.
+    """Rank targets in REGION by 'here now, gone soon' bucket drop.
 
-    Uses eBird's 0-9 bar-chart buckets (their site's own scale). A row like
-    'b7 → b1' means the species is common now but nearly absent by then.
+    Compares the current half-month to WEEKS-AHEAD from now using eBird's
+    0-9 bar-chart buckets (their site's own scale). A row like 'b7 → b1'
+    means the species is common now but nearly absent by then.
     """
     state = _setup(region, seen_list_arg)
     _print_header(state)
