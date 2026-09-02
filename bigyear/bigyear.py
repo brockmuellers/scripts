@@ -32,22 +32,23 @@ TOP_N       = 20
 MAX_RESULTS = 10000               # eBird's cap on /data/obs/*/recent — warn at this
 SEEN_STALE  = 30                  # warn if seen-list file is older than this many days
 CACHE_TTL   = 12 * 3600           # seconds
+BARCHART_TTL = 30 * 86400         # 5-year aggregate — day-to-day changes are noise
+CHECKLIST_TTL = 30 * 86400        # submitted checklists are immutable; keep 30d then drop
 THROTTLE    = 1.0                 # seconds between uncached calls
 CACHE_DIR   = Path.home() / ".cache" / "bigyear"
 API_BASE    = "https://api.ebird.org/v2"
 
 # ── HTTP + cache ────────────────────────────────────────────────────────────
 
-_progress_stack: list[dict] = []
+_progress: dict | None = None
 
 def _fetch_notify(url: str) -> None:
     """Emit a fetch line. In a batch, updates a single line as X/N."""
-    if not _progress_stack:
+    if _progress is None:
         click.echo(f"[fetch] {url}", err=True)
         return
-    top = _progress_stack[-1]
-    top["current"] += 1
-    line = f"{top['current']}/{top['total']} [fetch] {url}"
+    _progress["current"] += 1
+    line = f"{_progress['current']}/{_progress['total']} [fetch] {url}"
     if sys.stderr.isatty():
         sys.stderr.write(f"\r\033[K{line}")
         sys.stderr.flush()
@@ -56,11 +57,12 @@ def _fetch_notify(url: str) -> None:
 
 @contextmanager
 def _fetch_batch(total: int):
-    _progress_stack.append({"total": total, "current": 0})
+    global _progress
+    _progress = {"total": total, "current": 0}
     try:
         yield
     finally:
-        _progress_stack.pop()
+        _progress = None
         if sys.stderr.isatty():
             sys.stderr.write("\n")
             sys.stderr.flush()
@@ -70,15 +72,15 @@ def _cache_path(url: str) -> Path:
 
 _FORCE_REFRESH = False
 
-def _cache_fresh(path: Path) -> bool:
+def _cache_fresh(path: Path, ttl: int = CACHE_TTL) -> bool:
     if _FORCE_REFRESH:
         return False
-    return path.exists() and (time.time() - path.stat().st_mtime) < CACHE_TTL
+    return path.exists() and (time.time() - path.stat().st_mtime) < ttl
 
 def _cached_get(url: str, headers: dict | None = None,
-                cookies: dict | None = None):
+                cookies: dict | None = None, ttl: int = CACHE_TTL):
     cached = _cache_path(url)
-    if _cache_fresh(cached):
+    if _cache_fresh(cached, ttl=ttl):
         return json.loads(cached.read_text())
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     time.sleep(THROTTLE)
@@ -102,12 +104,12 @@ def _cached_get(url: str, headers: dict | None = None,
     cached.write_text(json.dumps(data))
     return data
 
-def api_get(path: str, params: dict | None = None):
+def api_get(path: str, params: dict | None = None, ttl: int = CACHE_TTL):
     key = os.environ.get("EBIRD_API_KEY")
     if not key:
         raise click.ClickException("EBIRD_API_KEY not set (check your .env file)")
     req = httpx.Request("GET", f"{API_BASE}{path}", params=params or {})
-    return _cached_get(str(req.url), headers={"X-eBirdApiToken": key})
+    return _cached_get(str(req.url), headers={"X-eBirdApiToken": key}, ttl=ttl)
 
 _BARCHART_ROW_RE = re.compile(
     r'data-species-code="([a-z0-9]+)".*?</tr>', re.DOTALL,
@@ -131,7 +133,7 @@ def barchart_get(region: str, years_back: int = 5) -> dict[str, list[int]]:
     )
     url = str(req.url)
     parsed_cache = _cache_path(url + "#parsed")
-    if _cache_fresh(parsed_cache):
+    if _cache_fresh(parsed_cache, ttl=BARCHART_TTL):
         return json.loads(parsed_cache.read_text())
 
     cookie = os.environ.get("EBIRD_SESSION")
@@ -144,11 +146,15 @@ def barchart_get(region: str, years_back: int = 5) -> dict[str, list[int]]:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     time.sleep(THROTTLE)
     _fetch_notify(url)
+    # Bar-chart HTML is large (2-6 MB for diverse hotspots) and slow to
+    # generate server-side; the 60s default here isn't always enough.
     resp = httpx.get(url, cookies={"EBIRD_SESSIONID": cookie},
-                     timeout=60, follow_redirects=True)
+                     timeout=180, follow_redirects=True)
     if resp.status_code != 200:
+        # eBird's error pages are large HTML — snippeting them is noise.
         raise click.ClickException(
-            f"HTTP {resp.status_code} on {url}: {resp.text[:200]}"
+            f"HTTP {resp.status_code} on {url} — eBird failed to produce a "
+            f"bar chart (often transient, or this location may not support one)."
         )
     html = resp.text
     result: dict[str, list[int]] = {}
@@ -156,6 +162,10 @@ def barchart_get(region: str, years_back: int = 5) -> dict[str, list[int]]:
         code = m.group(1)
         bins = [0 if b == "sp" else int(b[1:])
                 for b in _BARCHART_BIN_RE.findall(m.group(0))]
+        # eBird sometimes emits 47 bins (dropping the last Dec half-month);
+        # pad with 0 to keep 48-bin indexing valid.
+        if len(bins) == 47:
+            bins.append(0)
         if len(bins) != 48:
             continue  # skip anything with unexpected structure (header row etc)
         result[code] = bins
@@ -302,16 +312,37 @@ def rank_hotspots(
             "last_match": last_match,
             "targets": sorted(spp.items(), key=lambda kv: kv[1][0], reverse=True),
         })
-    if require_codes is not None:
-        rows.sort(key=lambda r: (r["last_match"], r["target_hits"],
-                                 r["num_spp_all_time"]), reverse=True)
-    else:
-        rows.sort(key=lambda r: (-r["target_hits"], -r["num_spp_all_time"]))
+    # last_match is "" without --species, so it degenerates to hits then all-time.
+    rows.sort(key=lambda r: (r["last_match"], r["target_hits"],
+                             r["num_spp_all_time"]), reverse=True)
     return rows[:top_n]
 
 # ── shared setup ────────────────────────────────────────────────────────────
 
 SPECIES_MAX_MATCHES = 10
+
+def _style_species(
+    name: str, is_leaving: bool, is_match: bool = False,
+    is_rare_hot: bool = False,
+) -> tuple[str, str]:
+    """Return (marker, styled_name).
+
+    Marker: '*' if rare-hot, '!' if leaving, ' ' otherwise.
+    Name color precedence: match (magenta) > rare-hot (cyan) > leaving (yellow).
+    """
+    if is_rare_hot:
+        marker = click.style("*", fg="cyan", bold=True)
+    elif is_leaving:
+        marker = click.style("!", fg="yellow", bold=True)
+    else:
+        marker = " "
+    if is_match:
+        return marker, click.style(name, fg="magenta", bold=True)
+    if is_rare_hot:
+        return marker, click.style(name, fg="cyan", bold=True)
+    if is_leaving:
+        return marker, click.style(name, fg="yellow", bold=True)
+    return marker, name
 
 def _resolve_species(
     query: str, scope_codes: set[str] | None = None,
@@ -365,11 +396,17 @@ def _setup(regions: tuple[str, ...] | str, seen_list_arg: str | None) -> dict:
     seen_path = _seen_list_path(seen_list_arg)
     seen_names, seen_mtime = load_seen_list(seen_path)
     taxonomy = api_get("/ref/taxonomy/ebird", {"fmt": "json"})
-    name_to_code = {t["comName"]: t["speciesCode"]
-                    for t in taxonomy if "speciesCode" in t and "comName" in t}
-    code_to_name = {v: k for k, v in name_to_code.items()}
-    species_only = {t["speciesCode"] for t in taxonomy
-                    if t.get("category") == "species" and "speciesCode" in t}
+    name_to_code: dict[str, str] = {}
+    code_to_name: dict[str, str] = {}
+    species_only: set[str] = set()
+    for t in taxonomy:
+        code, name = t.get("speciesCode"), t.get("comName")
+        if not code or not name:
+            continue
+        name_to_code[name] = code
+        code_to_name[code] = name
+        if t.get("category") == "species":
+            species_only.add(code)
     per_region: list[tuple[str, list[str]]] = []
     all_species: set[str] = set()
     for r in regions:
@@ -503,26 +540,22 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
     click.echo("")
     click.echo(f"{'Hits':>4}  {'AllSp':>5}  {'LocId':<10}  Hotspot")
     click.echo("-" * 84)
+    show_district = len({r["subregion"] for r in rows}) > 1
     for r in rows:
-        district = subregions.get(r["subregion"], r["subregion"])
+        prefix = ""
+        if show_district:
+            district = subregions.get(r["subregion"], r["subregion"])
+            prefix = f"{district} [{r['subregion']}] - "
         click.echo(
             f"{r['target_hits']:>4}  {r['num_spp_all_time']:>5}  "
-            f"{r['locId']:<10}  {district} - {r['name']} [{r['subregion']}]"
+            f"{r['locId']:<10}  {prefix}{r['name']}"
         )
         for code, (obsdt, comname) in r["targets"]:
-            is_leaving = code in leaving
-            is_match = require_codes is not None and code in require_codes
-            if is_match:
-                name = click.style(comname, fg="magenta", bold=True)
-            elif is_leaving:
-                name = click.style(comname, fg="yellow", bold=True)
-            else:
-                name = comname
-            if is_leaving:
-                marker = click.style("!", fg="yellow", bold=True)
-                click.echo(f"                       {marker} - {name}  ({obsdt})")
-            else:
-                click.echo(f"                         - {name}  ({obsdt})")
+            marker, name = _style_species(
+                comname, code in leaving,
+                is_match=require_codes is not None and code in require_codes,
+            )
+            click.echo(f"                       {marker} - {name}  ({obsdt})")
 
 @cli.command()
 @click.argument("region")
@@ -538,25 +571,20 @@ def targets(region: str, seen_list_arg: str | None) -> None:
     except click.ClickException as e:
         click.echo(f"(ranking alphabetically: {e.message})", err=True)
         bc = {}
-    leaving = _leaving_codes(region)
-    def score(code: str) -> float:
-        bins = bc.get(code)
-        return sum(bins) / len(bins) if bins else 0.0
+    leaving = _leaving_codes(region, bc=bc or None)
+    scores = {code: sum(bins) / len(bins) for code, bins in bc.items() if bins}
     ranked = sorted(
         state["targets"],
-        key=lambda c: (-score(c), state["code_to_name"].get(c, c)),
+        key=lambda c: (-scores.get(c, 0.0), state["code_to_name"].get(c, c)),
     )
     click.echo("")
     click.echo(" Avg  Code       Species")
     click.echo(" ---  ---------  -----------------")
     for code in ranked:
-        name = state["code_to_name"].get(code, "?")
-        if code in leaving:
-            marker = click.style("!", fg="yellow", bold=True)
-            name = click.style(name, fg="yellow", bold=True)
-            click.echo(f" {score(code):>3.1f}  {code:<9} {marker} {name}")
-        else:
-            click.echo(f" {score(code):>3.1f}  {code:<9}   {name}")
+        marker, name = _style_species(
+            state["code_to_name"].get(code, "?"), code in leaving,
+        )
+        click.echo(f" {scores.get(code, 0.0):>3.1f}  {code:<9} {marker} {name}")
 
 @cli.command()
 @click.argument("locid")
@@ -584,7 +612,7 @@ def deepdive(locid: str, seen_list_arg: str | None,
     hotspot_name = info.get("name", locid) if isinstance(info, dict) else locid
     region = (isinstance(info, dict) and
               (info.get("subnational1Code") or info.get("countryCode"))) or ""
-    leaving = _leaving_codes(region) if region else set()
+    leaving = _leaving_codes(region, quiet=True) if region else set()
 
     if fast:
         try:
@@ -612,16 +640,14 @@ def deepdive(locid: str, seen_list_arg: str | None,
             f"(5-year aggregate, 0-9 scale; 1=rare, 9=abundant).",
             err=True,
         )
+        if region:
+            click.echo(_leaving_legend(region), err=True)
         click.echo("")
         click.echo("  Bkt  Species")
         click.echo("  ---  -----------------")
         for code, name, bkt in rows_fast:
-            if code in leaving:
-                marker = click.style("!", fg="yellow", bold=True)
-                name = click.style(name, fg="yellow", bold=True)
-                click.echo(f"  {bkt:>3.1f} {marker} {name}")
-            else:
-                click.echo(f"  {bkt:>3.1f}   {name}")
+            marker, name = _style_species(name, code in leaving)
+            click.echo(f"  {bkt:>3.1f} {marker} {name}")
         return
 
     lists = api_get(f"/product/lists/{locid}", {"maxResults": 200})
@@ -644,30 +670,29 @@ def deepdive(locid: str, seen_list_arg: str | None,
         click.echo(f"No checklists at {locid} in last {back} days.")
         return
 
-    click.echo(f"Hotspot: {hotspot_name} [{locid}]", err=True)
-    click.echo(
-        f"Fetching {len(in_window)} checklists (~{len(in_window)}s if uncached).",
-        err=True,
-    )
     click.echo(
         "Tip: --fast makes this one HTTP call instead of ~one per checklist. "
         "Tradeoff: you get eBird's 0-9 bucket score (5-year historical for this "
-        "half-month) instead of actual-recent-window %/N. Better for planning, "
-        "worse for catching one-off vagrants that just showed up.",
+        "half-month) instead of actual-recent-window %/N.",
         err=True,
     )
-
     try:
         hotspot_bc = barchart_get(locid)
     except click.ClickException as e:
         click.echo(f"(skipping Bkt column: {e.message})", err=True)
         hotspot_bc = {}
     now_bin = _current_bin()
+    click.echo(
+        f"Fetching {len(in_window)} checklists (~{len(in_window)}s if uncached).",
+        err=True,
+    )
 
     hits: dict[str, int] = defaultdict(int)
     with _fetch_batch(len(in_window)):
         for c in in_window:
-            checklist = api_get(f"/product/checklist/view/{c['subId']}")
+            checklist = api_get(
+                f"/product/checklist/view/{c['subId']}", ttl=CHECKLIST_TTL,
+            )
             seen_in_this = set()
             for o in checklist.get("obs", []) or []:
                 code = o.get("speciesCode")
@@ -681,7 +706,17 @@ def deepdive(locid: str, seen_list_arg: str | None,
 
     total = len(in_window)
     click.echo("")
+    click.echo(f"Hotspot: {hotspot_name} [{locid}]")
     click.echo(f"Checklists in last {back} days: {total}")
+    if region:
+        click.echo(_leaving_legend(region), err=True)
+    star = click.style("*", fg="cyan", bold=True)
+    click.echo(
+        f"{star} = rare-but-hot: Pct / max(Bkt, 0.1) >= {RARE_HOT_SCORE} "
+        f"(higher = more surprising; historically rare or unrecorded here "
+        f"but reported recently).",
+        err=True,
+    )
     click.echo("")
     click.echo("  Pct   N  Bkt  Species")
     click.echo("  ----  --  ---  -----------------")
@@ -691,31 +726,49 @@ def deepdive(locid: str, seen_list_arg: str | None,
     )
     for code, n in rows:
         pct = round(100 * n / total)
-        name = code_to_name.get(code, code)
         bkt = _mean_window(hotspot_bc[code], now_bin, 1) if code in hotspot_bc else None
         bkt_s = f"{bkt:>3.1f}" if bkt is not None else "  -"
-        if code in leaving:
-            marker = click.style("!", fg="yellow", bold=True)
-            name = click.style(name, fg="yellow", bold=True)
-            click.echo(f"  {pct:>3}%  {n:>2}  {bkt_s} {marker} {name}")
-        else:
-            click.echo(f"  {pct:>3}%  {n:>2}  {bkt_s}   {name}")
+        is_rare_hot = bkt is not None and pct / max(bkt, 0.1) >= RARE_HOT_SCORE
+        marker, name = _style_species(
+            code_to_name.get(code, code), code in leaving,
+            is_rare_hot=is_rare_hot,
+        )
+        click.echo(f"  {pct:>3}%  {n:>2}  {bkt_s} {marker} {name}")
 
 LEAVING_WEEKS_AHEAD = 4
 LEAVING_MIN_NOW = 3       # current bucket must be at least this
 LEAVING_MIN_DROP = 2      # bucket drop must be at least this
+RARE_HOT_SCORE = 10       # surprise score = pct / max(bkt, 0.1); >= this fires.
+                          # Trips on e.g. 25%/bkt=2, 20%/bkt=1, 80%/bkt=4,
+                          # and any sighting of a never-recorded species (bkt=0).
 
-def _leaving_codes(region: str) -> set[str]:
+def _leaving_legend(region: str) -> str:
+    now_bin = _current_bin()
+    ahead_bin = (now_bin + LEAVING_WEEKS_AHEAD) % 48
+    marker = click.style("!", fg="yellow", bold=True)
+    return (
+        f"{marker} = 'leaving soon' in {region}: bucket >= {LEAVING_MIN_NOW} "
+        f"in {_bin_label(now_bin)}, dropping >= {LEAVING_MIN_DROP} bucket(s) "
+        f"by {_bin_label(ahead_bin)} ({LEAVING_WEEKS_AHEAD} weeks out). "
+        f"Bar chart: {datetime.now().year - 5}-{datetime.now().year}."
+    )
+
+def _leaving_codes(
+    region: str, bc: dict[str, list[int]] | None = None, quiet: bool = False,
+) -> set[str]:
     """Species codes currently 'here now, gone soon' in REGION.
 
     Silent-empty if EBIRD_SESSION isn't set or the barchart fetch fails, so
     `rank` still works without the cookie — just without the highlight.
+    Pass `bc` to reuse an already-fetched barchart. Pass `quiet=True` to
+    suppress the legend (the caller wants to print it elsewhere).
     """
-    try:
-        bc = barchart_get(region)
-    except click.ClickException as e:
-        click.echo(f"(skipping 'leaving' highlight: {e.message})", err=True)
-        return set()
+    if bc is None:
+        try:
+            bc = barchart_get(region)
+        except click.ClickException as e:
+            click.echo(f"(skipping 'leaving' highlight: {e.message})", err=True)
+            return set()
     now_bin = _current_bin()
     ahead_bin = (now_bin + LEAVING_WEEKS_AHEAD) % 48  # ~1 bin per week
     out: set[str] = set()
@@ -724,14 +777,8 @@ def _leaving_codes(region: str) -> set[str]:
         future_b = _mean_window(values, ahead_bin, 1)
         if now_b >= LEAVING_MIN_NOW and (now_b - future_b) >= LEAVING_MIN_DROP:
             out.add(code)
-    marker = click.style("!", fg="yellow", bold=True)
-    click.echo(
-        f"{marker} = 'leaving soon' in {region}: bucket >= {LEAVING_MIN_NOW} "
-        f"in {_bin_label(now_bin)}, dropping >= {LEAVING_MIN_DROP} bucket(s) "
-        f"by {_bin_label(ahead_bin)} ({LEAVING_WEEKS_AHEAD} weeks out). "
-        f"Bar chart: {datetime.now().year - 5}-{datetime.now().year}.",
-        err=True,
-    )
+    if not quiet:
+        click.echo(_leaving_legend(region), err=True)
     return out
 
 def _current_bin() -> int:
