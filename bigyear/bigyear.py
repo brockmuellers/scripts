@@ -38,6 +38,9 @@ THROTTLE    = 1.0                 # seconds between uncached calls
 CACHE_DIR   = Path.home() / ".cache" / "bigyear"
 API_BASE    = "https://api.ebird.org/v2"
 
+# For `targets --avg`: number of half-month bins around now to average.
+AVG_BINS = {"2wk": 1, "month": 4, "quarter": 12, "year": 48}
+
 # ── HTTP + cache ────────────────────────────────────────────────────────────
 
 _progress: dict | None = None
@@ -321,27 +324,33 @@ def rank_hotspots(
 
 SPECIES_MAX_MATCHES = 10
 
+def _warn(msg: str) -> str:
+    return f"{click.style('WARNING:', fg='red', bold=True)} {msg}"
+
 def _style_species(
     name: str, is_leaving: bool, is_match: bool = False,
-    is_rare_hot: bool = False,
+    is_rare_hot: bool = False, is_guaranteed: bool = False,
 ) -> tuple[str, str]:
     """Return (marker, styled_name).
 
-    Marker: '*' if rare-hot, '!' if leaving, ' ' otherwise.
-    Name color precedence: match (magenta) > rare-hot (cyan) > leaving (yellow).
+    Marker is always 3 visible characters: !=* (leaving, guaranteed, rare-hot),
+    each shown or blank independently — so overlaps stay visible.
+    Name color precedence:
+      match (magenta) > leaving (yellow) > guaranteed (green) > rare-hot (cyan).
     """
-    if is_rare_hot:
-        marker = click.style("*", fg="cyan", bold=True)
-    elif is_leaving:
-        marker = click.style("!", fg="yellow", bold=True)
-    else:
-        marker = " "
+    marker = (
+        (click.style("!", fg="yellow", bold=True) if is_leaving else " ")
+        + (click.style("=", fg="green", bold=True) if is_guaranteed else " ")
+        + (click.style("*", fg="cyan", bold=True) if is_rare_hot else " ")
+    )
     if is_match:
         return marker, click.style(name, fg="magenta", bold=True)
-    if is_rare_hot:
-        return marker, click.style(name, fg="cyan", bold=True)
     if is_leaving:
         return marker, click.style(name, fg="yellow", bold=True)
+    if is_guaranteed:
+        return marker, click.style(name, fg="green", bold=True)
+    if is_rare_hot:
+        return marker, click.style(name, fg="cyan", bold=True)
     return marker, name
 
 def _resolve_species(
@@ -484,25 +493,35 @@ def cli(refresh: bool) -> None:
               help="Look back this many days for recent observations.")
 @click.option("--top", "top_n", default=TOP_N, show_default=True,
               help="Show at most this many hotspots.")
-@click.option("--species", "species_query", default=None,
+@click.option("--min-hits", default=MIN_HITS, show_default=True,
+              help="Skip hotspots with fewer distinct target hits than this. "
+                   "Ignored when --species is set (forced to 1).")
+@click.option("--species", "species_queries", multiple=True,
               help="Filter to hotspots that have this species in recent obs "
-                   "(common-name substring). Includes species already on your "
-                   "seen list; overrides MIN_HITS to 1.")
+                   "(common-name substring). Repeat the flag, or pass "
+                   "comma-separated names, to include multiple species. "
+                   "Overrides MIN_HITS to 1.")
 def rank(regions: tuple[str, ...], seen_list_arg: str | None,
-         back: int, top_n: int, species_query: str | None) -> None:
+         back: int, top_n: int, min_hits: int,
+         species_queries: tuple[str, ...]) -> None:
     """Rank hotspots in REGIONS by target-species presence."""
     state = _setup(regions, seen_list_arg)
     _print_header(state)
     require_codes: set[str] | None = None
-    if species_query:
-        resolved = _resolve_species(
-            species_query, scope_codes=set(state["region_species"]),
-        )
-        require_codes = {c for c, _ in resolved}
+    if species_queries:
+        # Also split any comma-separated values within a single --species.
+        queries = [q.strip() for group in species_queries
+                   for q in group.split(",") if q.strip()]
+        require_codes = set()
+        resolved_names: list[str] = []
+        scope = set(state["region_species"])
+        for q in queries:
+            for code, name in _resolve_species(q, scope_codes=scope):
+                require_codes.add(code)
+                resolved_names.append(name)
         state["targets"] = set(state["targets"]) | require_codes
-        names = ", ".join(n for _, n in resolved)
         click.echo(
-            f"Filtering to hotspots with any of: {names} "
+            f"Filtering to hotspots with any of: {', '.join(resolved_names)} "
             f"(seen in the last {back} days).", err=True,
         )
     hotspots: list[dict] = []
@@ -531,7 +550,7 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
         leaving |= _leaving_codes(r)
     rows = rank_hotspots(
         recent, hotspots, state["targets"], top_n,
-        min_hits=1 if require_codes else MIN_HITS,
+        min_hits=1 if require_codes else min_hits,
         require_codes=require_codes,
     )
     if not rows:
@@ -555,39 +574,57 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
                 comname, code in leaving,
                 is_match=require_codes is not None and code in require_codes,
             )
-            click.echo(f"                       {marker} - {name}  ({obsdt})")
+            click.echo(f"                     {marker} - {name}  ({obsdt})")
 
 @cli.command()
 @click.argument("region")
 @click.option("--seen-list", "seen_list_arg", default=None,
               help="Path to eBird CSV of species you've already seen "
                    "(or set BIGYEAR_SEEN_LIST).")
-def targets(region: str, seen_list_arg: str | None) -> None:
+@click.option("--avg", "avg_window", type=click.Choice(list(AVG_BINS)),
+              default="year", show_default=True,
+              help="Window for the Avg column, starting at now and going "
+                   "forward: 2wk = current half-month, month = next ~4 wks, "
+                   "quarter = next ~3 mo, year = all 48 half-months.")
+def targets(region: str, seen_list_arg: str | None, avg_window: str) -> None:
     """Print your remaining target species for REGION, ranked by frequency."""
     state = _setup(region, seen_list_arg)
     _print_header(state)
     try:
         bc = barchart_get(region)
     except click.ClickException as e:
-        click.echo(f"(ranking alphabetically: {e.message})", err=True)
+        click.echo(_warn(f"ranking alphabetically: {e.message}"), err=True)
         bc = {}
     leaving = _leaving_codes(region, bc=bc or None)
-    scores = {code: sum(bins) / len(bins) for code, bins in bc.items() if bins}
+    now_bin = _current_bin()
+    count = AVG_BINS[avg_window]
+    scores = {code: _mean_forward(bins, now_bin, count)
+              for code, bins in bc.items() if bins}
     ranked = sorted(
         state["targets"],
         key=lambda c: (-scores.get(c, 0.0), state["code_to_name"].get(c, c)),
     )
+    ahead_bin = (now_bin + LEAVING_WEEKS_AHEAD) % 48
     click.echo("")
-    click.echo(" Avg  Code       Species")
-    click.echo(" ---  ---------  -----------------")
-    for code in ranked:
+    width = len(str(len(ranked)))
+    click.echo(f"{'#':>{width}}   Avg  Code       Species")
+    click.echo(f"{'-' * width}   ---  ---------    -----------------")
+    for i, code in enumerate(ranked, 1):
         marker, name = _style_species(
             state["code_to_name"].get(code, "?"), code in leaving,
         )
-        click.echo(f" {scores.get(code, 0.0):>3.1f}  {code:<9} {marker} {name}")
+        suffix = ""
+        if code in leaving and code in bc:
+            now_b = _mean_window(bc[code], now_bin, 1)
+            future_b = _mean_window(bc[code], ahead_bin, 1)
+            suffix = f"  ({now_b:.1f} → {future_b:.1f})"
+        click.echo(
+            f"{i:>{width}}  {scores.get(code, 0.0):>3.1f}  {code:<9} "
+            f"{marker} {name}{suffix}"
+        )
 
 @cli.command()
-@click.argument("locid")
+@click.argument("locids", nargs=-1, required=True)
 @click.option("--seen-list", "seen_list_arg", default=None,
               help="Path to eBird CSV of species you've already seen "
                    "(or set BIGYEAR_SEEN_LIST).")
@@ -597,9 +634,22 @@ def targets(region: str, seen_list_arg: str | None) -> None:
               help="Skip per-checklist walking. One HTTP call: use the hotspot's "
                    "5-year bar-chart buckets for the current half-month instead. "
                    "No 'Pct/N' — just the 0-9 bucket score.")
-def deepdive(locid: str, seen_list_arg: str | None,
+def deepdive(locids: tuple[str, ...], seen_list_arg: str | None,
              back: int, fast: bool) -> None:
-    """Per-species checklist frequency at hotspot LOCID."""
+    """Per-species checklist frequency at one or more hotspot LOCIDs."""
+    for i, locid in enumerate(locids, 1):
+        if len(locids) > 1:
+            click.echo("", err=True)
+            click.echo("=" * 70, err=True)
+            click.echo(f"[{i}/{len(locids)}] {locid}", err=True)
+            click.echo("=" * 70, err=True)
+        try:
+            _run_deepdive(locid, seen_list_arg, back, fast)
+        except click.ClickException as e:
+            click.echo(f"(skipped {locid}: {e.message})", err=True)
+
+def _run_deepdive(locid: str, seen_list_arg: str | None,
+                  back: int, fast: bool) -> None:
     seen_path = _seen_list_path(seen_list_arg)
     seen_names, _ = load_seen_list(seen_path)
     taxonomy = api_get("/ref/taxonomy/ebird", {"fmt": "json"})
@@ -643,8 +693,8 @@ def deepdive(locid: str, seen_list_arg: str | None,
         if region:
             click.echo(_leaving_legend(region), err=True)
         click.echo("")
-        click.echo("  Bkt  Species")
-        click.echo("  ---  -----------------")
+        click.echo("  Bkt    Species")
+        click.echo("  ---    -----------------")
         for code, name, bkt in rows_fast:
             marker, name = _style_species(name, code in leaving)
             click.echo(f"  {bkt:>3.1f} {marker} {name}")
@@ -679,7 +729,7 @@ def deepdive(locid: str, seen_list_arg: str | None,
     try:
         hotspot_bc = barchart_get(locid)
     except click.ClickException as e:
-        click.echo(f"(skipping Bkt column: {e.message})", err=True)
+        click.echo(_warn(f"skipping Bkt column: {e.message}"), err=True)
         hotspot_bc = {}
     now_bin = _current_bin()
     click.echo(
@@ -688,6 +738,7 @@ def deepdive(locid: str, seen_list_arg: str | None,
     )
 
     hits: dict[str, int] = defaultdict(int)
+    last_seen: dict[str, str] = {}
     with _fetch_batch(len(in_window)):
         for c in in_window:
             checklist = api_get(
@@ -703,6 +754,8 @@ def deepdive(locid: str, seen_list_arg: str | None,
                 if name in seen_names:
                     continue
                 hits[code] += 1
+                if c["obsDt"] > last_seen.get(code, ""):
+                    last_seen[code] = c["obsDt"]
 
     total = len(in_window)
     click.echo("")
@@ -710,6 +763,11 @@ def deepdive(locid: str, seen_list_arg: str | None,
     click.echo(f"Checklists in last {back} days: {total}")
     if region:
         click.echo(_leaving_legend(region), err=True)
+    eq = click.style("=", fg="green", bold=True)
+    click.echo(
+        f"{eq} = virtual guarantee: Pct >= {GUARANTEED_PCT}%.",
+        err=True,
+    )
     star = click.style("*", fg="cyan", bold=True)
     click.echo(
         f"{star} = rare-but-hot: Pct / max(Bkt, 0.1) >= {RARE_HOT_SCORE} "
@@ -718,8 +776,8 @@ def deepdive(locid: str, seen_list_arg: str | None,
         err=True,
     )
     click.echo("")
-    click.echo("  Pct   N  Bkt  Species")
-    click.echo("  ----  --  ---  -----------------")
+    click.echo("  Pct   N  Bkt  Last      Species")
+    click.echo("  ----  --  ---  ------    -----------------")
     rows = sorted(
         hits.items(),
         key=lambda kv: (-kv[1], code_to_name.get(kv[0], kv[0])),
@@ -732,12 +790,15 @@ def deepdive(locid: str, seen_list_arg: str | None,
         marker, name = _style_species(
             code_to_name.get(code, code), code in leaving,
             is_rare_hot=is_rare_hot,
+            is_guaranteed=pct >= GUARANTEED_PCT,
         )
-        click.echo(f"  {pct:>3}%  {n:>2}  {bkt_s} {marker} {name}")
+        last = _parse_dt(last_seen[code]).strftime("%d %b") if code in last_seen else "      "
+        click.echo(f"  {pct:>3}%  {n:>2}  {bkt_s}  {last:>6}  {marker} {name}")
 
 LEAVING_WEEKS_AHEAD = 4
 LEAVING_MIN_NOW = 3       # current bucket must be at least this
 LEAVING_MIN_DROP = 2      # bucket drop must be at least this
+GUARANTEED_PCT = 80       # deepdive: species seen in >= this % of checklists.
 RARE_HOT_SCORE = 10       # surprise score = pct / max(bkt, 0.1); >= this fires.
                           # Trips on e.g. 25%/bkt=2, 20%/bkt=1, 80%/bkt=4,
                           # and any sighting of a never-recorded species (bkt=0).
@@ -767,7 +828,7 @@ def _leaving_codes(
         try:
             bc = barchart_get(region)
         except click.ClickException as e:
-            click.echo(f"(skipping 'leaving' highlight: {e.message})", err=True)
+            click.echo(_warn(f"skipping 'leaving' highlight: {e.message}"), err=True)
             return set()
     now_bin = _current_bin()
     ahead_bin = (now_bin + LEAVING_WEEKS_AHEAD) % 48  # ~1 bin per week
@@ -798,6 +859,14 @@ def _mean_window(values: list[float], center: int, radius: int) -> float:
     if not n:
         return 0.0
     picks = [values[(center + i) % n] for i in range(-radius, radius + 1)]
+    return sum(picks) / len(picks)
+
+def _mean_forward(values: list[float], start: int, count: int) -> float:
+    """Mean of `count` bins starting at `start`, wrapping the 48-bin year."""
+    n = len(values)
+    if not n or count <= 0:
+        return 0.0
+    picks = [values[(start + i) % n] for i in range(count)]
     return sum(picks) / len(picks)
 
 @cli.command()
@@ -890,6 +959,95 @@ def cookie(value: str, env_file: str) -> None:
     path.write_text("\n".join(lines) + "\n")
     action = "Updated" if replaced else "Added"
     click.echo(f"{action} EBIRD_SESSION in {path}.")
+
+def _favorites_path() -> Path:
+    p = os.environ.get("BIGYEAR_FAVORITES_FILE")
+    return Path(p).expanduser() if p else Path.home() / ".config" / "bigyear" / "favorites.txt"
+
+def _load_favorites() -> list[tuple[str, str]]:
+    path = _favorites_path()
+    if not path.exists():
+        return []
+    out: list[tuple[str, str]] = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        out.append((parts[0], parts[1] if len(parts) > 1 else ""))
+    return out
+
+def _save_favorites(favs: list[tuple[str, str]]) -> None:
+    path = _favorites_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "\n".join(f"{loc}\t{note}".rstrip() for loc, note in favs)
+    path.write_text(body + "\n" if body else "")
+
+@cli.group()
+def favs() -> None:
+    """Manage favorite hotspots (stored one per line in a text file)."""
+
+@favs.command("add")
+@click.argument("locid")
+def favs_add(locid: str) -> None:
+    """Add LOCID to favorites (looks up its name from eBird)."""
+    existing = _load_favorites()
+    if any(loc == locid for loc, _ in existing):
+        click.echo(f"{locid} already in favorites.", err=True)
+        return
+    try:
+        info = api_get(f"/ref/hotspot/info/{locid}")
+        name = info.get("name", "") if isinstance(info, dict) else ""
+    except click.ClickException:
+        name = ""
+    existing.append((locid, name))
+    _save_favorites(existing)
+    click.echo(f"Added {locid} ({name or 'no name'}) to {_favorites_path()}.")
+
+@favs.command("rm")
+@click.argument("locid")
+def favs_rm(locid: str) -> None:
+    """Remove LOCID from favorites."""
+    existing = _load_favorites()
+    new = [(loc, note) for loc, note in existing if loc != locid]
+    if len(new) == len(existing):
+        raise click.ClickException(f"{locid} not in favorites.")
+    _save_favorites(new)
+    click.echo(f"Removed {locid}.")
+
+@favs.command("list")
+def favs_list() -> None:
+    """List favorite hotspots."""
+    existing = _load_favorites()
+    if not existing:
+        click.echo(f"No favorites in {_favorites_path()}.")
+        return
+    for loc, note in existing:
+        click.echo(f"  {loc:<10}  {note}")
+
+@favs.command("deepdive")
+@click.option("--seen-list", "seen_list_arg", default=None,
+              help="Path to eBird CSV of species you've already seen "
+                   "(or set BIGYEAR_SEEN_LIST).")
+@click.option("--back", default=BACK_DAYS, show_default=True,
+              help="Only consider checklists from the last this many days.")
+@click.option("--fast", is_flag=True,
+              help="Use --fast deepdive mode (bar-chart buckets, one HTTP call).")
+def favs_deepdive(seen_list_arg: str | None,
+                  back: int, fast: bool) -> None:
+    """Run deepdive on every favorite hotspot."""
+    existing = _load_favorites()
+    if not existing:
+        raise click.ClickException(f"No favorites in {_favorites_path()}.")
+    for i, (loc, note) in enumerate(existing, 1):
+        click.echo("", err=True)
+        click.echo("=" * 70, err=True)
+        click.echo(f"[{i}/{len(existing)}] {loc}  {note}", err=True)
+        click.echo("=" * 70, err=True)
+        try:
+            _run_deepdive(loc, seen_list_arg, back, fast)
+        except click.ClickException as e:
+            click.echo(f"(skipped {loc}: {e.message})", err=True)
 
 @cli.command(name="map")
 @click.argument("name", nargs=-1, required=True)
