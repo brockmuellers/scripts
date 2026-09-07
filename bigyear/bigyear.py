@@ -358,8 +358,11 @@ def _style_species(
         return marker, click.style(name, fg="cyan", bold=True)
     return marker, name
 
-def _life_names(cli_arg: str | None) -> set[str]:
-    """Load life-list names, or an empty set if no life list is configured."""
+def _life_names(cli_arg: str | None, disabled: bool = False) -> set[str]:
+    """Load life-list names, or an empty set if no life list is configured
+    (or if disabled)."""
+    if disabled:
+        return set()
     p = cli_arg or os.environ.get("BIGYEAR_LIFE_LIST")
     if not p:
         return set()
@@ -512,6 +515,9 @@ def cli(refresh: bool) -> None:
               help="Path to eBird CSV of your life list "
                    "(or set BIGYEAR_LIFE_LIST). Species not on it are "
                    "flagged as lifers.")
+@click.option("--no-lifers", is_flag=True, default=False,
+              help="Disable lifer highlighting even when a life list is "
+                   "configured (via --life-list or BIGYEAR_LIFE_LIST).")
 @click.option("--back", default=BACK_DAYS, show_default=True,
               help="Look back this many days for recent observations.")
 @click.option("--top", "top_n", default=TOP_N, show_default=True,
@@ -525,13 +531,13 @@ def cli(refresh: bool) -> None:
                    "comma-separated names, to include multiple species. "
                    "Overrides MIN_HITS to 1.")
 def rank(regions: tuple[str, ...], seen_list_arg: str | None,
-         life_list_arg: str | None,
+         life_list_arg: str | None, no_lifers: bool,
          back: int, top_n: int, min_hits: int,
          species_queries: tuple[str, ...]) -> None:
     """Rank hotspots in REGIONS by target-species presence."""
     state = _setup(regions, seen_list_arg)
     _print_header(state)
-    life_names = _life_names(life_list_arg)
+    life_names = _life_names(life_list_arg, no_lifers)
     if life_names:
         click.echo(_lifer_legend(life_names), err=True)
     require_codes: set[str] | None = None
@@ -613,17 +619,21 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
               help="Path to eBird CSV of your life list "
                    "(or set BIGYEAR_LIFE_LIST). Species not on it are "
                    "flagged as lifers.")
+@click.option("--no-lifers", is_flag=True, default=False,
+              help="Disable lifer highlighting even when a life list is "
+                   "configured (via --life-list or BIGYEAR_LIFE_LIST).")
 @click.option("--avg", "avg_window", type=click.Choice(list(AVG_BINS)),
               default="year", show_default=True,
               help="Window for the Avg column, starting at now and going "
                    "forward: 2wk = current half-month, month = next ~4 wks, "
                    "quarter = next ~3 mo, year = all 48 half-months.")
 def targets(region: str, seen_list_arg: str | None,
-            life_list_arg: str | None, avg_window: str) -> None:
+            life_list_arg: str | None, no_lifers: bool,
+            avg_window: str) -> None:
     """Print your remaining target species for REGION, ranked by frequency."""
     state = _setup(region, seen_list_arg)
     _print_header(state)
-    life_names = _life_names(life_list_arg)
+    life_names = _life_names(life_list_arg, no_lifers)
     try:
         bc = barchart_get(region)
     except click.ClickException as e:
@@ -681,9 +691,12 @@ def targets(region: str, seen_list_arg: str | None,
               help="Path to eBird CSV of your life list "
                    "(or set BIGYEAR_LIFE_LIST). Species not on it are "
                    "flagged as lifers.")
+@click.option("--no-lifers", is_flag=True, default=False,
+              help="Disable lifer highlighting even when a life list is "
+                   "configured (via --life-list or BIGYEAR_LIFE_LIST).")
 def deepdive(locids: tuple[str, ...], seen_list_arg: str | None,
              back: int, fast: bool, leaving_region: str | None,
-             life_list_arg: str | None) -> None:
+             life_list_arg: str | None, no_lifers: bool) -> None:
     """Per-species checklist frequency at one or more hotspot LOCIDs."""
     for i, locid in enumerate(locids, 1):
         if len(locids) > 1:
@@ -693,17 +706,18 @@ def deepdive(locids: tuple[str, ...], seen_list_arg: str | None,
             click.echo("=" * 70, err=True)
         try:
             _run_deepdive(locid, seen_list_arg, back, fast, leaving_region,
-                          life_list_arg)
+                          life_list_arg, no_lifers)
         except click.ClickException as e:
             click.echo(f"(skipped {locid}: {e.message})", err=True)
 
 def _run_deepdive(locid: str, seen_list_arg: str | None,
                   back: int, fast: bool,
                   leaving_region: str | None = None,
-                  life_list_arg: str | None = None) -> None:
+                  life_list_arg: str | None = None,
+                  no_lifers: bool = False) -> None:
     seen_path = _seen_list_path(seen_list_arg)
     seen_names, _ = load_seen_list(seen_path)
-    life_names = _life_names(life_list_arg)
+    life_names = _life_names(life_list_arg, no_lifers)
     taxonomy = api_get("/ref/taxonomy/ebird", {"fmt": "json"})
     code_to_name = {t["speciesCode"]: t["comName"]
                     for t in taxonomy if "speciesCode" in t and "comName" in t}
@@ -1103,9 +1117,12 @@ def favs_list() -> None:
 @click.option("--life-list", "life_list_arg", default=None,
               help="Path to eBird CSV of your life list (or set "
                    "BIGYEAR_LIFE_LIST).")
+@click.option("--no-lifers", is_flag=True, default=False,
+              help="Disable lifer highlighting even when a life list is "
+                   "configured (via --life-list or BIGYEAR_LIFE_LIST).")
 def favs_deepdive(seen_list_arg: str | None,
                   back: int, fast: bool, leaving_region: str | None,
-                  life_list_arg: str | None) -> None:
+                  life_list_arg: str | None, no_lifers: bool) -> None:
     """Run deepdive on every favorite hotspot."""
     existing = _load_favorites()
     if not existing:
@@ -1117,7 +1134,7 @@ def favs_deepdive(seen_list_arg: str | None,
         click.echo("=" * 70, err=True)
         try:
             _run_deepdive(loc, seen_list_arg, back, fast, leaving_region,
-                          life_list_arg)
+                          life_list_arg, no_lifers)
         except click.ClickException as e:
             click.echo(f"(skipped {loc}: {e.message})", err=True)
 
