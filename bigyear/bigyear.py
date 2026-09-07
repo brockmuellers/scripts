@@ -330,14 +330,19 @@ def _warn(msg: str) -> str:
 def _style_species(
     name: str, is_leaving: bool, is_match: bool = False,
     is_rare_hot: bool = False, is_guaranteed: bool = False,
+    is_lifer: bool = False,
 ) -> tuple[str, str]:
     """Return (marker, styled_name).
 
-    Marker is always 3 visible characters: !=* (leaving, guaranteed, rare-hot),
-    each shown or blank independently — so overlaps stay visible.
-    Name color precedence:
+    Lifer trumps everything: marker becomes 'L  ' (bold red) and the name is
+    bold red, hiding every other marker/color. Otherwise, marker is 3 chars
+    ('!=*': leaving, guaranteed, rare-hot) with each slot independent — so
+    overlaps stay visible — and name color precedence is:
       match (magenta) > leaving (yellow) > guaranteed (green) > rare-hot (cyan).
     """
+    if is_lifer:
+        return (click.style("L", fg="red", bold=True) + "  ",
+                click.style(name, fg="red", bold=True))
     marker = (
         (click.style("!", fg="yellow", bold=True) if is_leaving else " ")
         + (click.style("=", fg="green", bold=True) if is_guaranteed else " ")
@@ -352,6 +357,20 @@ def _style_species(
     if is_rare_hot:
         return marker, click.style(name, fg="cyan", bold=True)
     return marker, name
+
+def _life_names(cli_arg: str | None) -> set[str]:
+    """Load life-list names, or an empty set if no life list is configured."""
+    p = cli_arg or os.environ.get("BIGYEAR_LIFE_LIST")
+    if not p:
+        return set()
+    names, _ = load_seen_list(Path(p).expanduser())
+    return names
+
+def _lifer_legend(life_names: set[str]) -> str:
+    return (
+        f"{click.style('L', fg='red', bold=True)} = lifer "
+        f"(not among your {len(life_names)} life-list species)"
+    )
 
 def _resolve_species(
     query: str, scope_codes: set[str] | None = None,
@@ -489,6 +508,10 @@ def cli(refresh: bool) -> None:
 @click.option("--seen-list", "seen_list_arg", default=None,
               help="Path to eBird CSV of species you've already seen "
                    "(or set BIGYEAR_SEEN_LIST).")
+@click.option("--life-list", "life_list_arg", default=None,
+              help="Path to eBird CSV of your life list "
+                   "(or set BIGYEAR_LIFE_LIST). Species not on it are "
+                   "flagged as lifers.")
 @click.option("--back", default=BACK_DAYS, show_default=True,
               help="Look back this many days for recent observations.")
 @click.option("--top", "top_n", default=TOP_N, show_default=True,
@@ -502,11 +525,15 @@ def cli(refresh: bool) -> None:
                    "comma-separated names, to include multiple species. "
                    "Overrides MIN_HITS to 1.")
 def rank(regions: tuple[str, ...], seen_list_arg: str | None,
+         life_list_arg: str | None,
          back: int, top_n: int, min_hits: int,
          species_queries: tuple[str, ...]) -> None:
     """Rank hotspots in REGIONS by target-species presence."""
     state = _setup(regions, seen_list_arg)
     _print_header(state)
+    life_names = _life_names(life_list_arg)
+    if life_names:
+        click.echo(_lifer_legend(life_names), err=True)
     require_codes: set[str] | None = None
     if species_queries:
         # Also split any comma-separated values within a single --species.
@@ -573,6 +600,7 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
             marker, name = _style_species(
                 comname, code in leaving,
                 is_match=require_codes is not None and code in require_codes,
+                is_lifer=bool(life_names) and comname not in life_names,
             )
             click.echo(f"                     {marker} - {name}  ({obsdt})")
 
@@ -581,21 +609,29 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
 @click.option("--seen-list", "seen_list_arg", default=None,
               help="Path to eBird CSV of species you've already seen "
                    "(or set BIGYEAR_SEEN_LIST).")
+@click.option("--life-list", "life_list_arg", default=None,
+              help="Path to eBird CSV of your life list "
+                   "(or set BIGYEAR_LIFE_LIST). Species not on it are "
+                   "flagged as lifers.")
 @click.option("--avg", "avg_window", type=click.Choice(list(AVG_BINS)),
               default="year", show_default=True,
               help="Window for the Avg column, starting at now and going "
                    "forward: 2wk = current half-month, month = next ~4 wks, "
                    "quarter = next ~3 mo, year = all 48 half-months.")
-def targets(region: str, seen_list_arg: str | None, avg_window: str) -> None:
+def targets(region: str, seen_list_arg: str | None,
+            life_list_arg: str | None, avg_window: str) -> None:
     """Print your remaining target species for REGION, ranked by frequency."""
     state = _setup(region, seen_list_arg)
     _print_header(state)
+    life_names = _life_names(life_list_arg)
     try:
         bc = barchart_get(region)
     except click.ClickException as e:
         click.echo(_warn(f"ranking alphabetically: {e.message}"), err=True)
         bc = {}
     leaving = _leaving_codes(region, bc=bc or None)
+    if life_names:
+        click.echo(_lifer_legend(life_names), err=True)
     now_bin = _current_bin()
     count = AVG_BINS[avg_window]
     scores = {code: _mean_forward(bins, now_bin, count)
@@ -610,8 +646,10 @@ def targets(region: str, seen_list_arg: str | None, avg_window: str) -> None:
     click.echo(f"{'#':>{width}}   Avg  Code       Species")
     click.echo(f"{'-' * width}   ---  ---------    -----------------")
     for i, code in enumerate(ranked, 1):
+        comname = state["code_to_name"].get(code, "?")
         marker, name = _style_species(
-            state["code_to_name"].get(code, "?"), code in leaving,
+            comname, code in leaving,
+            is_lifer=bool(life_names) and comname not in life_names,
         )
         suffix = ""
         if code in leaving and code in bc:
@@ -634,8 +672,18 @@ def targets(region: str, seen_list_arg: str | None, avg_window: str) -> None:
               help="Skip per-checklist walking. One HTTP call: use the hotspot's "
                    "5-year bar-chart buckets for the current half-month instead. "
                    "No 'Pct/N' — just the 0-9 bucket score.")
+@click.option("--leaving-region", default=None,
+              help="Region for the 'leaving soon' comparison. "
+                   "Default: the hotspot's subnational2 (e.g. CA-BC-GV), "
+                   "falling back to subnational1 then country. "
+                   "Pass a broader code like CA-BC to widen the signal.")
+@click.option("--life-list", "life_list_arg", default=None,
+              help="Path to eBird CSV of your life list "
+                   "(or set BIGYEAR_LIFE_LIST). Species not on it are "
+                   "flagged as lifers.")
 def deepdive(locids: tuple[str, ...], seen_list_arg: str | None,
-             back: int, fast: bool) -> None:
+             back: int, fast: bool, leaving_region: str | None,
+             life_list_arg: str | None) -> None:
     """Per-species checklist frequency at one or more hotspot LOCIDs."""
     for i, locid in enumerate(locids, 1):
         if len(locids) > 1:
@@ -644,14 +692,18 @@ def deepdive(locids: tuple[str, ...], seen_list_arg: str | None,
             click.echo(f"[{i}/{len(locids)}] {locid}", err=True)
             click.echo("=" * 70, err=True)
         try:
-            _run_deepdive(locid, seen_list_arg, back, fast)
+            _run_deepdive(locid, seen_list_arg, back, fast, leaving_region,
+                          life_list_arg)
         except click.ClickException as e:
             click.echo(f"(skipped {locid}: {e.message})", err=True)
 
 def _run_deepdive(locid: str, seen_list_arg: str | None,
-                  back: int, fast: bool) -> None:
+                  back: int, fast: bool,
+                  leaving_region: str | None = None,
+                  life_list_arg: str | None = None) -> None:
     seen_path = _seen_list_path(seen_list_arg)
     seen_names, _ = load_seen_list(seen_path)
+    life_names = _life_names(life_list_arg)
     taxonomy = api_get("/ref/taxonomy/ebird", {"fmt": "json"})
     code_to_name = {t["speciesCode"]: t["comName"]
                     for t in taxonomy if "speciesCode" in t and "comName" in t}
@@ -660,8 +712,12 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
 
     info = api_get(f"/ref/hotspot/info/{locid}")
     hotspot_name = info.get("name", locid) if isinstance(info, dict) else locid
-    region = (isinstance(info, dict) and
-              (info.get("subnational1Code") or info.get("countryCode"))) or ""
+    region = leaving_region or (
+        isinstance(info, dict) and
+        (info.get("subnational2Code")
+         or info.get("subnational1Code")
+         or info.get("countryCode"))
+    ) or ""
     leaving = _leaving_codes(region, quiet=True) if region else set()
 
     if fast:
@@ -692,11 +748,16 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
         )
         if region:
             click.echo(_leaving_legend(region), err=True)
+        if life_names:
+            click.echo(_lifer_legend(life_names), err=True)
         click.echo("")
         click.echo("  Bkt    Species")
         click.echo("  ---    -----------------")
         for code, name, bkt in rows_fast:
-            marker, name = _style_species(name, code in leaving)
+            marker, name = _style_species(
+                name, code in leaving,
+                is_lifer=bool(life_names) and name not in life_names,
+            )
             click.echo(f"  {bkt:>3.1f} {marker} {name}")
         return
 
@@ -761,6 +822,8 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
     click.echo("")
     click.echo(f"Hotspot: {hotspot_name} [{locid}]")
     click.echo(f"Checklists in last {back} days: {total}")
+    if life_names:
+        click.echo(_lifer_legend(life_names), err=True)
     if region:
         click.echo(_leaving_legend(region), err=True)
     eq = click.style("=", fg="green", bold=True)
@@ -787,10 +850,12 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
         bkt = _mean_window(hotspot_bc[code], now_bin, 1) if code in hotspot_bc else None
         bkt_s = f"{bkt:>3.1f}" if bkt is not None else "  -"
         is_rare_hot = bkt is not None and pct / max(bkt, 0.1) >= RARE_HOT_SCORE
+        comname = code_to_name.get(code, code)
         marker, name = _style_species(
-            code_to_name.get(code, code), code in leaving,
+            comname, code in leaving,
             is_rare_hot=is_rare_hot,
             is_guaranteed=pct >= GUARANTEED_PCT,
+            is_lifer=bool(life_names) and comname not in life_names,
         )
         last = _parse_dt(last_seen[code]).strftime("%d %b") if code in last_seen else "      "
         click.echo(f"  {pct:>3}%  {n:>2}  {bkt_s}  {last:>6}  {marker} {name}")
@@ -1033,8 +1098,14 @@ def favs_list() -> None:
               help="Only consider checklists from the last this many days.")
 @click.option("--fast", is_flag=True,
               help="Use --fast deepdive mode (bar-chart buckets, one HTTP call).")
+@click.option("--leaving-region", default=None,
+              help="Region for the 'leaving soon' comparison (e.g. CA-BC-GV).")
+@click.option("--life-list", "life_list_arg", default=None,
+              help="Path to eBird CSV of your life list (or set "
+                   "BIGYEAR_LIFE_LIST).")
 def favs_deepdive(seen_list_arg: str | None,
-                  back: int, fast: bool) -> None:
+                  back: int, fast: bool, leaving_region: str | None,
+                  life_list_arg: str | None) -> None:
     """Run deepdive on every favorite hotspot."""
     existing = _load_favorites()
     if not existing:
@@ -1045,7 +1116,8 @@ def favs_deepdive(seen_list_arg: str | None,
         click.echo(f"[{i}/{len(existing)}] {loc}  {note}", err=True)
         click.echo("=" * 70, err=True)
         try:
-            _run_deepdive(loc, seen_list_arg, back, fast)
+            _run_deepdive(loc, seen_list_arg, back, fast, leaving_region,
+                          life_list_arg)
         except click.ClickException as e:
             click.echo(f"(skipped {loc}: {e.message})", err=True)
 
