@@ -33,6 +33,7 @@ MAX_RESULTS = 10000               # eBird's cap on /data/obs/*/recent — warn a
 SEEN_STALE  = 30                  # warn if seen-list file is older than this many days
 CACHE_TTL   = 12 * 3600           # seconds
 LISTS_TTL   = 3600                # /product/lists — new checklists trickle in through the day
+RECENT_TTL  = 3600                # /data/obs/*/recent — same trickle
 BARCHART_TTL = 30 * 86400         # 5-year aggregate — day-to-day changes are noise
 CHECKLIST_TTL = 30 * 86400        # submitted checklists are immutable; keep 30d then drop
 THROTTLE    = 1.0                 # seconds between uncached calls
@@ -231,7 +232,7 @@ def subregion_map(region: str) -> dict[str, str]:
         return {}
     return {r["code"]: r.get("name", r["code"]) for r in data if r.get("code")}
 
-def fetch_recent(region: str, back: int) -> list[dict]:
+def fetch_recent(region: str, back: int, fresh: bool = False) -> list[dict]:
     """Fetch recent obs across region, sharding by subnational2 when possible.
     Warns on any shard that returns MAX_RESULTS rows (probable truncation).
     """
@@ -248,6 +249,7 @@ def fetch_recent(region: str, back: int) -> list[dict]:
                 f"/data/obs/{r}/recent",
                 {"back": back, "hotspot": "true",
                  "includeProvisional": "false", "maxResults": MAX_RESULTS},
+                ttl=0 if fresh else RECENT_TTL,
             )
             if len(obs) >= MAX_RESULTS:
                 click.echo(
@@ -531,10 +533,13 @@ def cli(refresh: bool) -> None:
                    "(common-name substring). Repeat the flag, or pass "
                    "comma-separated names, to include multiple species. "
                    "Overrides MIN_HITS to 1.")
+@click.option("--fresh", is_flag=True, default=False,
+              help="Bypass the recent-obs cache to pick up sightings "
+                   "submitted since the last run (default TTL is 1 hour).")
 def rank(regions: tuple[str, ...], seen_list_arg: str | None,
          life_list_arg: str | None, no_lifers: bool,
          back: int, top_n: int, min_hits: int,
-         species_queries: tuple[str, ...]) -> None:
+         species_queries: tuple[str, ...], fresh: bool) -> None:
     """Rank hotspots in REGIONS by target-species presence."""
     state = _setup(regions, seen_list_arg)
     _print_header(state)
@@ -568,7 +573,7 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
             if h.get("locId") not in seen_locs:
                 seen_locs.add(h["locId"])
                 hotspots.append(h)
-        recent.extend(fetch_recent(r, back))
+        recent.extend(fetch_recent(r, back, fresh=fresh))
         if require_codes:
             # /data/obs/{r}/recent dedupes to one row per species region-wide,
             # so a species-filter needs the per-species endpoint to see every
@@ -579,6 +584,7 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
                         f"/data/obs/{r}/recent/{code}",
                         {"back": back, "hotspot": "true",
                          "includeProvisional": "false"},
+                        ttl=0 if fresh else RECENT_TTL,
                     ))
         subregions.update(subregion_map(r))
         leaving |= _leaving_codes(r)
