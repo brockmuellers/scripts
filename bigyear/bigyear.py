@@ -32,6 +32,7 @@ TOP_N       = 20
 MAX_RESULTS = 10000               # eBird's cap on /data/obs/*/recent — warn at this
 SEEN_STALE  = 30                  # warn if seen-list file is older than this many days
 CACHE_TTL   = 12 * 3600           # seconds
+LISTS_TTL   = 3600                # /product/lists — new checklists trickle in through the day
 BARCHART_TTL = 30 * 86400         # 5-year aggregate — day-to-day changes are noise
 CHECKLIST_TTL = 30 * 86400        # submitted checklists are immutable; keep 30d then drop
 THROTTLE    = 1.0                 # seconds between uncached calls
@@ -694,9 +695,12 @@ def targets(region: str, seen_list_arg: str | None,
 @click.option("--no-lifers", is_flag=True, default=False,
               help="Disable lifer highlighting even when a life list is "
                    "configured (via --life-list or BIGYEAR_LIFE_LIST).")
+@click.option("--fresh", is_flag=True, default=False,
+              help="Bypass the /product/lists cache to pick up checklists "
+                   "submitted since the last run (default TTL is 1 hour).")
 def deepdive(locids: tuple[str, ...], seen_list_arg: str | None,
              back: int, fast: bool, leaving_region: str | None,
-             life_list_arg: str | None, no_lifers: bool) -> None:
+             life_list_arg: str | None, no_lifers: bool, fresh: bool) -> None:
     """Per-species checklist frequency at one or more hotspot LOCIDs."""
     for i, locid in enumerate(locids, 1):
         if len(locids) > 1:
@@ -706,7 +710,7 @@ def deepdive(locids: tuple[str, ...], seen_list_arg: str | None,
             click.echo("=" * 70, err=True)
         try:
             _run_deepdive(locid, seen_list_arg, back, fast, leaving_region,
-                          life_list_arg, no_lifers)
+                          life_list_arg, no_lifers, fresh)
         except click.ClickException as e:
             click.echo(f"(skipped {locid}: {e.message})", err=True)
 
@@ -714,7 +718,8 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
                   back: int, fast: bool,
                   leaving_region: str | None = None,
                   life_list_arg: str | None = None,
-                  no_lifers: bool = False) -> None:
+                  no_lifers: bool = False,
+                  fresh: bool = False) -> None:
     seen_path = _seen_list_path(seen_list_arg)
     seen_names, _ = load_seen_list(seen_path)
     life_names = _life_names(life_list_arg, no_lifers)
@@ -775,7 +780,8 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
             click.echo(f"  {bkt:>3.1f} {marker} {name}")
         return
 
-    lists = api_get(f"/product/lists/{locid}", {"maxResults": 200})
+    lists = api_get(f"/product/lists/{locid}", {"maxResults": 200},
+                    ttl=0 if fresh else LISTS_TTL)
     cutoff = datetime.now() - timedelta(days=back)
     def _parse_dt(s: str) -> datetime:
         for fmt in ("%d %b %Y", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
@@ -813,12 +819,18 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
     )
 
     hits: dict[str, int] = defaultdict(int)
-    last_seen: dict[str, str] = {}
+    last_seen: dict[str, tuple[datetime, str]] = {}
     with _fetch_batch(len(in_window)):
         for c in in_window:
             checklist = api_get(
                 f"/product/checklist/view/{c['subId']}", ttl=CHECKLIST_TTL,
             )
+            # /product/lists returns date-only obsDt ("8 Sep 2026"); the
+            # checklist-view payload has "YYYY-MM-DD HH:MM" when the observer
+            # recorded a start time.
+            obs_dt = (checklist.get("obsDt") if checklist.get("obsTimeValid")
+                      else c["obsDt"])
+            obs_key = _parse_dt(obs_dt)
             seen_in_this = set()
             for o in checklist.get("obs", []) or []:
                 code = o.get("speciesCode")
@@ -829,8 +841,9 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
                 if name in seen_names:
                     continue
                 hits[code] += 1
-                if c["obsDt"] > last_seen.get(code, ""):
-                    last_seen[code] = c["obsDt"]
+                prev = last_seen.get(code)
+                if prev is None or obs_key > prev[0]:
+                    last_seen[code] = (obs_key, obs_dt)
 
     total = len(in_window)
     click.echo("")
@@ -853,8 +866,8 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
         err=True,
     )
     click.echo("")
-    click.echo("  Pct   N  Bkt  Last      Species")
-    click.echo("  ----  --  ---  ------    -----------------")
+    click.echo("  Pct   N  Bkt  Last            Species")
+    click.echo("  ----  --  ---  ------------    -----------------")
     rows = sorted(
         hits.items(),
         key=lambda kv: (-kv[1], code_to_name.get(kv[0], kv[0])),
@@ -871,8 +884,13 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
             is_guaranteed=pct >= GUARANTEED_PCT,
             is_lifer=bool(life_names) and comname not in life_names,
         )
-        last = _parse_dt(last_seen[code]).strftime("%d %b") if code in last_seen else "      "
-        click.echo(f"  {pct:>3}%  {n:>2}  {bkt_s}  {last:>6}  {marker} {name}")
+        if code in last_seen:
+            dt, raw = last_seen[code]
+            fmt = "%d %b %H:%M" if ":" in raw else "%d %b"
+            last = dt.strftime(fmt)
+        else:
+            last = ""
+        click.echo(f"  {pct:>3}%  {n:>2}  {bkt_s}  {last:<12}    {marker} {name}")
 
 LEAVING_WEEKS_AHEAD = 4
 LEAVING_MIN_NOW = 3       # current bucket must be at least this
@@ -1039,6 +1057,105 @@ def cookie(value: str, env_file: str) -> None:
     action = "Updated" if replaced else "Added"
     click.echo(f"{action} EBIRD_SESSION in {path}.")
 
+def _download_list_csv(region: str, time_param: str, year: int | None,
+                       dest: Path, label: str) -> int:
+    """Download an eBird lifelist CSV to dest. Returns species count."""
+    cookie = os.environ.get("EBIRD_SESSION")
+    if not cookie:
+        raise click.ClickException(
+            "Refresh needs EBIRD_SESSION (same cookie barchartData uses). "
+            "Log in at ebird.org and run: ./bigyear.py cookie <value>"
+        )
+    params = {"r": region, "time": time_param, "fmt": "csv"}
+    if year is not None:
+        params["year"] = str(year)
+    req = httpx.Request("GET", "https://ebird.org/lifelist", params=params)
+    url = str(req.url)
+    click.echo(f"Fetching {label}", err=True)
+    click.echo(f"  [{url}]", err=True)
+    time.sleep(THROTTLE)
+    resp = httpx.get(url, cookies={"EBIRD_SESSIONID": cookie},
+                     timeout=60, follow_redirects=True)
+    if resp.status_code != 200:
+        raise click.ClickException(
+            f"HTTP {resp.status_code} on {url}: {resp.text[:200]}"
+        )
+    body = resp.text
+    ctype = resp.headers.get("content-type", "")
+    if "text/html" in ctype or body.lstrip().startswith("<"):
+        raise click.ClickException(
+            f"{label} download returned HTML, not CSV (content-type {ctype}). "
+            "EBIRD_SESSION cookie is likely expired — refresh with the "
+            "`cookie` command."
+        )
+    first_line = body.splitlines()[0] if body else ""
+    if not any(col in first_line for col in ("Common Name", "Species", "common_name")):
+        raise click.ClickException(
+            f"{label} download missing species column. First line: {first_line!r}"
+        )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(body)
+    names, _ = load_seen_list(dest)
+    return len(names)
+
+@cli.command()
+@click.option("--life/--no-life", "do_life", default=True,
+              help="Refresh the life list (default: yes).")
+@click.option("--year/--no-year", "do_year", default=True,
+              help="Refresh the year list (default: yes).")
+@click.option("--life-region", default=None,
+              help="Region for the life-list download "
+                   "(or set BIGYEAR_LIFE_REGION; falls back to 'world').")
+@click.option("--year-region", default=None,
+              help="Region for the year-list download "
+                   "(or set BIGYEAR_YEAR_REGION; falls back to 'world').")
+@click.option("--year-of", type=int, default=None,
+              help="Calendar year for the year list (default: current year).")
+@click.option("--life-list", "life_list_arg", default=None,
+              help="Destination CSV for the life list "
+                   "(or set BIGYEAR_LIFE_LIST).")
+@click.option("--seen-list", "seen_list_arg", default=None,
+              help="Destination CSV for the year list "
+                   "(or set BIGYEAR_SEEN_LIST).")
+def refresh(do_life: bool, do_year: bool,
+            life_region: str | None, year_region: str | None,
+            year_of: int | None, life_list_arg: str | None,
+            seen_list_arg: str | None) -> None:
+    """Re-download life list & year list CSVs from ebird.org.
+
+    Uses EBIRD_SESSION (same cookie as barchartData). Writes to the paths the
+    rest of the tool reads from (BIGYEAR_LIFE_LIST / BIGYEAR_SEEN_LIST).
+    """
+    if not do_life and not do_year:
+        raise click.ClickException(
+            "Nothing to refresh — remove --no-life or --no-year."
+        )
+    year_of = year_of or datetime.now().year
+    life_region = life_region or os.environ.get("BIGYEAR_LIFE_REGION") or "world"
+    year_region = year_region or os.environ.get("BIGYEAR_YEAR_REGION") or "world"
+    jobs: list[tuple[str, str, str, int | None, Path]] = []
+    if do_life:
+        env = life_list_arg or os.environ.get("BIGYEAR_LIFE_LIST")
+        if not env:
+            raise click.ClickException(
+                "No destination for life list — pass --life-list or set "
+                "BIGYEAR_LIFE_LIST in .env."
+            )
+        jobs.append(("life list", life_region, "life", None,
+                     Path(env).expanduser()))
+    if do_year:
+        env = seen_list_arg or os.environ.get("BIGYEAR_SEEN_LIST")
+        if not env:
+            raise click.ClickException(
+                "No destination for year list — pass --seen-list or set "
+                "BIGYEAR_SEEN_LIST in .env."
+            )
+        jobs.append((f"year list {year_of} ({year_region})", year_region,
+                     "year", year_of, Path(env).expanduser()))
+    for label, region, time_param, yr, dest in jobs:
+        n = _download_list_csv(region, time_param, yr, dest, label)
+        click.echo(f"  wrote {n} species → {dest}")
+
 def _favorites_path() -> Path:
     p = os.environ.get("BIGYEAR_FAVORITES_FILE")
     return Path(p).expanduser() if p else Path.home() / ".config" / "bigyear" / "favorites.txt"
@@ -1120,9 +1237,13 @@ def favs_list() -> None:
 @click.option("--no-lifers", is_flag=True, default=False,
               help="Disable lifer highlighting even when a life list is "
                    "configured (via --life-list or BIGYEAR_LIFE_LIST).")
+@click.option("--fresh", is_flag=True, default=False,
+              help="Bypass the /product/lists cache to pick up checklists "
+                   "submitted since the last run (default TTL is 1 hour).")
 def favs_deepdive(seen_list_arg: str | None,
                   back: int, fast: bool, leaving_region: str | None,
-                  life_list_arg: str | None, no_lifers: bool) -> None:
+                  life_list_arg: str | None, no_lifers: bool,
+                  fresh: bool) -> None:
     """Run deepdive on every favorite hotspot."""
     existing = _load_favorites()
     if not existing:
@@ -1134,7 +1255,7 @@ def favs_deepdive(seen_list_arg: str | None,
         click.echo("=" * 70, err=True)
         try:
             _run_deepdive(loc, seen_list_arg, back, fast, leaving_region,
-                          life_list_arg, no_lifers)
+                          life_list_arg, no_lifers, fresh)
         except click.ClickException as e:
             click.echo(f"(skipped {loc}: {e.message})", err=True)
 
