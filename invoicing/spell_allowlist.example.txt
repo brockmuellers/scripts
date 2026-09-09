@@ -1,0 +1,7 @@
+# Template for spell_allowlist.txt — copy to spell_allowlist.txt and add
+# your own domain/project words. spell_allowlist.txt is gitignored so
+# client- or project-specific jargon stays out of version control.
+#
+# One word per line. Case-insensitive. Blank lines and lines starting
+# with `#` are ignored. Words listed here won't be flagged by the
+# spellcheck pass in generate_weasyprint.py.

@@ -1,0 +1,32 @@
+# Template for a per-invoice config file.
+#
+# Copy to something like `invoice_<client>_<YYYY-MM>.toml` (e.g.
+# `invoice_acme_2026-07.toml`) and fill in real values, then pass the
+# path to generate_weasyprint.py:
+#
+#   python3 generate_weasyprint.py invoice_acme_2026-07.toml
+#
+# Files matching `invoice_*.toml` are gitignored so real invoices stay
+# out of version control.
+
+invoice_number = "2026-07"
+issue_date = 2026-07-31
+
+# `client` is a key from clients.toml (see clients.example.toml).
+client = "acme"
+project = "Software Engineering Services"
+
+# Path to the hours CSV, relative to this file (or absolute).
+hours_csv = "hours.csv"
+
+hourly_rate = 150.00
+currency = "USD"
+
+[billing_period]
+start = 2026-07-01
+end = 2026-07-31
+
+# GST/HST — zero-rated for exported services to non-Canadian clients.
+[gst]
+rate = 0.0
+note = "0% Zero-Rated Export"

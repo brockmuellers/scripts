@@ -1,0 +1,16 @@
+# Template for personal_info.toml — copy to personal_info.toml and fill in real values.
+# personal_info.toml is gitignored so your personal/banking info stays out of version control.
+
+[from]
+name = "Your Name"
+address_lines = ["123 Example St", "Vancouver, BC V0V 0V0"]
+email = "you@example.com"
+cra_business_number = "000000000 RT0001"
+
+[payment]
+method = "ACH Transfer"
+account_name = "Your Name"
+account_number = "000000000"
+routing_number = "000000000"
+bank_name = "Your Bank"
+bank_address_lines = ["P.O. Box 000", "City, ST 00000"]

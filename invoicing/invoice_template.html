@@ -1,0 +1,110 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Invoice {{ invoice_number }}</title>
+<style>
+  @page { size: Letter; margin: 0.75in; }
+  body { font-family: "Helvetica", "Arial", sans-serif; color: #222; font-size: 10pt; line-height: 1.35; }
+  h1 { font-size: 20pt; margin: 0; letter-spacing: 2px; }
+  h2 { font-size: 11pt; margin: 18pt 0 6pt; }
+  .meta { margin-top: 8pt; line-height: 1.6; }
+  .parties { display: flex; justify-content: space-between; margin-top: 20pt; gap: 24pt; }
+  .parties .block { flex: 1; }
+  .parties .label { font-weight: bold; }
+  .project { margin-top: 18pt; }
+  table.items { width: 100%; border-collapse: collapse; margin-top: 6pt; }
+  table.items thead th { border-bottom: 1px solid #999; color: #444; text-align: left; padding: 5pt 8pt; font-weight: bold; text-transform: uppercase; font-size: 8.5pt; letter-spacing: 0.5px; }
+  table.items thead th.num { text-align: right; }
+  table.items tbody td { padding: 7pt 8pt; vertical-align: top; }
+  table.items tr { page-break-inside: avoid; break-inside: avoid; }
+  table.items tbody tr:nth-child(even) td { background: #f5f5f5; }
+  table.items tbody tr.sum td { background: none; padding: 5pt 8pt; text-align: right; }
+  .num { text-align: right; white-space: nowrap; }
+  td.date { white-space: nowrap; }
+  td.desc { white-space: pre-line; }
+  table.items tbody tr.sum-first td { padding-top: 12pt; border-top: 1px solid #999; }
+  table.items tbody tr.sum-gap td { padding-top: 24pt; }
+  table.items tbody tr.grand td { font-weight: bold; }
+  .payment { margin-top: 6pt; }
+  .payment .bank { margin-top: 10pt; }
+</style>
+</head>
+<body>
+  <h1>INVOICE</h1>
+  <div class="meta">
+    <div><strong>Invoice Number:</strong> {{ invoice_number }}</div>
+    <div><strong>Date of Issue:</strong> {{ issue_date }}</div>
+    <div><strong>Billing Period:</strong> {{ period_start }} – {{ period_end }}</div>
+  </div>
+
+  <div class="parties">
+    <div class="block">
+      <div class="label">From:</div>
+      <div>{{ from_.name }}</div>
+      {% for line in from_.address_lines %}<div>{{ line }}</div>{% endfor %}
+      <div>{{ from_.email }}</div>
+      <div>CRA Business Number: {{ from_.cra_business_number }}</div>
+    </div>
+    <div class="block">
+      <div class="label">To:</div>
+      <div>{{ bill_to.name }}</div>
+      {% for c in bill_to.contacts %}<div>{{ c }}</div>{% endfor %}
+    </div>
+  </div>
+
+  <div class="project"><strong>Project:</strong> {{ project }}</div>
+
+  <h2>Services Rendered</h2>
+  <table class="items">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Description of Work</th>
+        <th class="num">Hours</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for i in items %}
+      <tr>
+        <td class="date">{{ i.date_str }}</td>
+        <td class="desc">{{ i.description }}</td>
+        <td class="num">{{ "%.2f"|format(i.hours) }}</td>
+      </tr>
+      {% endfor %}
+      <tr class="sum sum-first">
+        <td></td>
+        <td>Total Billable Hours</td>
+        <td class="num">{{ "%.2f"|format(total_hours) }}</td>
+      </tr>
+      <tr class="sum sum-gap">
+        <td></td>
+        <td>Subtotal ({{ "%.2f"|format(total_hours) }} hours @ ${{ rate|money }}/hr)</td>
+        <td class="num">${{ subtotal|money }}</td>
+      </tr>
+      <tr class="sum">
+        <td></td>
+        <td>GST/HST ({{ gst_note }})</td>
+        <td class="num">${{ tax|money }}</td>
+      </tr>
+      <tr class="sum grand">
+        <td></td>
+        <td>Total Amount Due ({{ currency }})</td>
+        <td class="num">${{ total_due|money }}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Payment Details</h2>
+  <div class="payment">
+    <div><strong>Preferred Payment Method:</strong> {{ payment.method }}</div>
+    <div><strong>Name on Account:</strong> {{ payment.account_name }}</div>
+    <div><strong>Account Number:</strong> {{ payment.account_number }}</div>
+    <div><strong>ACH Routing Number:</strong> {{ payment.routing_number }}</div>
+    <div class="bank">
+      <div>{{ payment.bank_name }}</div>
+      {% for line in payment.bank_address_lines %}<div>{{ line }}</div>{% endfor %}
+    </div>
+  </div>
+</body>
+</html>

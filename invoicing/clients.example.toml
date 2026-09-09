@@ -1,0 +1,13 @@
+# Template for clients.toml — copy to clients.toml and fill in real values.
+# clients.toml is gitignored so client info stays out of version control.
+#
+# Add one [clients.<key>] block per client. In a per-invoice TOML, set
+# `client` to the key of the client you're billing.
+
+[clients.acme]
+name = "Acme Widgets, Inc."
+contacts = ["ap@acme.example", "cto@acme.example"]
+
+[clients.globex]
+name = "Globex Corp"
+contacts = ["billing@globex.example"]

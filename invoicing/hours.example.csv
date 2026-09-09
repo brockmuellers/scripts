@@ -1,0 +1,6 @@
+date,hours,description
+2026-01-05,2.50,Project kickoff meeting - gathered requirements
+2026-01-08,4.00,"Infrastructure setup - configured environments, initialized repository"
+2026-01-12,3.25,Implemented core data model and initial migrations
+2026-01-15,1.75,Code review and follow-up fixes
+2026-01-20,5.00,"Built reporting dashboard - backend endpoints, query layer"

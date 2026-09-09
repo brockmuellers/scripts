@@ -1,0 +1,17 @@
+personal_info.toml
+clients.toml
+hours.csv
+__pycache__/
+*.pyc
+invoice_*.pdf
+invoice_*.toml
+spell_allowlist.txt
+
+# Per-client working directories (Clockify exports, generated invoices,
+# hours.csv). Everything under clients/ is gitignored — one subdir per client.
+clients/
+
+# Belt-and-suspenders: catch source data / prior invoices anywhere in the tree.
+Clockify_*.csv
+Invoice_*.docx
+Invoice_*.pdf
