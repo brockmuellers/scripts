@@ -332,24 +332,31 @@ def _warn(msg: str) -> str:
 
 def _style_species(
     name: str, is_leaving: bool, is_match: bool = False,
-    is_rare_hot: bool = False, is_guaranteed: bool = False,
-    is_lifer: bool = False,
+    is_rare_hot: bool = False, is_rare_year: bool = False,
+    is_guaranteed: bool = False, is_lifer: bool = False,
 ) -> tuple[str, str]:
     """Return (marker, styled_name).
 
     Lifer trumps everything: marker becomes 'L  ' (bold red) and the name is
     bold red, hiding every other marker/color. Otherwise, marker is 3 chars
-    ('!=*': leaving, guaranteed, rare-hot) with each slot independent — so
-    overlaps stay visible — and name color precedence is:
-      match (magenta) > leaving (yellow) > guaranteed (green) > rare-hot (cyan).
+    ('!' leaving, '=' guaranteed, 'R'/'*' rare) with each slot independent.
+    In the rare slot, 'R' (rare year-round) wins over '*' (rare in the
+    current bin) since it subsumes it. Name color precedence: match (magenta)
+    > leaving (yellow) > guaranteed (green) > rare (cyan).
     """
     if is_lifer:
         return (click.style("L", fg="red", bold=True) + "  ",
                 click.style(name, fg="red", bold=True))
+    if is_rare_year:
+        rare_slot = click.style("R", fg="cyan", bold=True)
+    elif is_rare_hot:
+        rare_slot = click.style("*", fg="cyan", bold=True)
+    else:
+        rare_slot = " "
     marker = (
         (click.style("!", fg="yellow", bold=True) if is_leaving else " ")
         + (click.style("=", fg="green", bold=True) if is_guaranteed else " ")
-        + (click.style("*", fg="cyan", bold=True) if is_rare_hot else " ")
+        + rare_slot
     )
     if is_match:
         return marker, click.style(name, fg="magenta", bold=True)
@@ -357,7 +364,7 @@ def _style_species(
         return marker, click.style(name, fg="yellow", bold=True)
     if is_guaranteed:
         return marker, click.style(name, fg="green", bold=True)
-    if is_rare_hot:
+    if is_rare_hot or is_rare_year:
         return marker, click.style(name, fg="cyan", bold=True)
     return marker, name
 
@@ -567,6 +574,8 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
     recent: list[dict] = []
     subregions: dict[str, str] = {}
     leaving: set[str] = set()
+    rare: set[str] = set()
+    rare_year: set[str] = set()
     seen_locs: set[str] = set()
     for r in regions:
         for h in api_get(f"/ref/hotspot/{r}", {"fmt": "json"}):
@@ -587,7 +596,20 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
                         ttl=0 if fresh else RECENT_TTL,
                     ))
         subregions.update(subregion_map(r))
-        leaving |= _leaving_codes(r)
+        try:
+            bc = barchart_get(r)
+        except click.ClickException as e:
+            click.echo(_warn(f"skipping leaving/rare highlights for {r}: "
+                             f"{e.message}"), err=True)
+            bc = {}
+        leaving |= _leaving_codes(r, bc=bc, quiet=True)
+        rare |= _rare_codes(bc)
+        rare_year |= _rare_year_codes(bc)
+    if leaving:
+        click.echo(_leaving_legend(regions[0] if len(regions) == 1
+                                   else ", ".join(regions)), err=True)
+    if rare or rare_year:
+        click.echo(_rare_legend(), err=True)
     rows = rank_hotspots(
         recent, hotspots, state["targets"], top_n,
         min_hits=1 if require_codes else min_hits,
@@ -613,6 +635,8 @@ def rank(regions: tuple[str, ...], seen_list_arg: str | None,
             marker, name = _style_species(
                 comname, code in leaving,
                 is_match=require_codes is not None and code in require_codes,
+                is_rare_hot=code in rare,
+                is_rare_year=code in rare_year,
                 is_lifer=bool(life_names) and comname not in life_names,
             )
             click.echo(f"                     {marker} - {name}  ({obsdt})")
@@ -647,6 +671,9 @@ def targets(region: str, seen_list_arg: str | None,
         click.echo(_warn(f"ranking alphabetically: {e.message}"), err=True)
         bc = {}
     leaving = _leaving_codes(region, bc=bc or None)
+    rare_year = _rare_year_codes(bc)
+    if rare_year:
+        click.echo(_rare_legend(include_now=False), err=True)
     if life_names:
         click.echo(_lifer_legend(life_names), err=True)
     now_bin = _current_bin()
@@ -666,6 +693,7 @@ def targets(region: str, seen_list_arg: str | None,
         comname = state["code_to_name"].get(code, "?")
         marker, name = _style_species(
             comname, code in leaving,
+            is_rare_year=code in rare_year,
             is_lifer=bool(life_names) and comname not in life_names,
         )
         suffix = ""
@@ -899,8 +927,13 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
         click.echo(f"  {pct:>3}%  {n:>2}  {bkt_s}  {last:<12}    {marker} {name}")
 
 LEAVING_WEEKS_AHEAD = 4
-LEAVING_MIN_NOW = 3       # current bucket must be at least this
-LEAVING_MIN_DROP = 2      # bucket drop must be at least this
+LEAVING_MIN_NOW = 2       # current bucket must be at least this
+LEAVING_MIN_DROP = 1      # bucket drop must be at least this
+RARE_BUCKET_MAX = 1       # rank: species with mean bucket around now <= this
+                          # get the rare-hot '*' highlight.
+RARE_YEAR_BUCKET_MAX = 2  # rank: species whose 5-year peak bucket (max across
+                          # all 48 bins) is <= this get the rare-year 'R'
+                          # highlight — never common in any season.
 GUARANTEED_PCT = 80       # deepdive: species seen in >= this % of checklists.
 RARE_HOT_SCORE = 10       # surprise score = pct / max(bkt, 0.1); >= this fires.
                           # Trips on e.g. 25%/bkt=2, 20%/bkt=1, 80%/bkt=4,
@@ -915,6 +948,37 @@ def _leaving_legend(region: str) -> str:
         f"in {_bin_label(now_bin)}, dropping >= {LEAVING_MIN_DROP} bucket(s) "
         f"by {_bin_label(ahead_bin)} ({LEAVING_WEEKS_AHEAD} weeks out). "
         f"Bar chart: {datetime.now().year - 5}-{datetime.now().year}."
+    )
+
+def _rare_codes(bc: dict[str, list[int]]) -> set[str]:
+    """Species codes with mean bucket around 'now' <= RARE_BUCKET_MAX."""
+    now_bin = _current_bin()
+    return {
+        code for code, values in bc.items()
+        if _mean_window(values, now_bin, 1) <= RARE_BUCKET_MAX
+    }
+
+def _rare_year_codes(bc: dict[str, list[int]]) -> set[str]:
+    """Species codes whose peak 5-year-averaged bucket across all 48 bins
+    is <= RARE_YEAR_BUCKET_MAX (never common in any season)."""
+    return {
+        code for code, values in bc.items()
+        if values and max(values) <= RARE_YEAR_BUCKET_MAX
+    }
+
+def _rare_legend(include_now: bool = True) -> str:
+    r = click.style("R", fg="cyan", bold=True)
+    if not include_now:
+        return (
+            f"{r} = rare year-round: peak 5-year bucket across all seasons "
+            f"is <= {RARE_YEAR_BUCKET_MAX}."
+        )
+    star = click.style("*", fg="cyan", bold=True)
+    return (
+        f"{star}/{r} = rare here: 5-year bucket around "
+        f"{_bin_label(_current_bin())} is <= {RARE_BUCKET_MAX} (seen "
+        f"recently despite that); {r} if peak 5-year bucket across "
+        f"all seasons is <= {RARE_YEAR_BUCKET_MAX}."
     )
 
 def _leaving_codes(
@@ -982,9 +1046,9 @@ def _mean_forward(values: list[float], start: int, count: int) -> float:
 @click.option("--min-now", default=3, show_default=True,
               help="Only flag species currently at eBird bucket >= this "
                    "(1=rare, 9=abundant).")
-@click.option("--min-drop", default=0.0, show_default=True,
+@click.option("--min-drop", default=0.5, show_default=True,
               help="Only show species whose bucket drop is at least this. "
-                   "Use a negative value to include steady/rising species.")
+                   "Use 0 to include flat, negative to include rising.")
 def leaving(region: str, seen_list_arg: str | None,
             weeks_ahead: int, min_now: int, min_drop: float) -> None:
     """Rank targets in REGION by 'here now, gone soon' bucket drop.
@@ -1030,7 +1094,7 @@ def leaving(region: str, seen_list_arg: str | None,
     for r in rows:
         click.echo(
             f"  {r['now']:>3.1f}  {r['future']:>3.1f}  "
-            f"{r['drop']:>+4.1f}  {r['name']}"
+            f"{r['drop']:>4.1f}  {r['name']}"
         )
 
 @cli.command()
