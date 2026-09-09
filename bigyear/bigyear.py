@@ -750,9 +750,12 @@ def targets(region: str, seen_list_arg: str | None,
 @click.option("--fresh", is_flag=True, default=False,
               help="Bypass the /product/lists cache to pick up checklists "
                    "submitted since the last run (default TTL is 1 hour).")
+@click.option("--no-times", is_flag=True, default=False,
+              help="Skip the 'Times 5a-8p' hour-of-day sparkline column.")
 def deepdive(locids: tuple[str, ...], seen_list_arg: str | None,
              back: int, fast: bool, leaving_region: str | None,
-             life_list_arg: str | None, lifers: bool, fresh: bool) -> None:
+             life_list_arg: str | None, lifers: bool, fresh: bool,
+             no_times: bool) -> None:
     """Per-species checklist frequency at one or more hotspot LOCIDs."""
     for i, locid in enumerate(locids, 1):
         if len(locids) > 1:
@@ -762,7 +765,7 @@ def deepdive(locids: tuple[str, ...], seen_list_arg: str | None,
             click.echo("=" * 70, err=True)
         try:
             _run_deepdive(locid, seen_list_arg, back, fast, leaving_region,
-                          life_list_arg, lifers, fresh)
+                          life_list_arg, lifers, fresh, no_times)
         except click.ClickException as e:
             click.echo(f"(skipped {locid}: {e.message})", err=True)
 
@@ -771,7 +774,8 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
                   leaving_region: str | None = None,
                   life_list_arg: str | None = None,
                   lifers: bool = False,
-                  fresh: bool = False) -> None:
+                  fresh: bool = False,
+                  no_times: bool = False) -> None:
     seen_path = _seen_list_path(seen_list_arg)
     seen_names, _ = load_seen_list(seen_path)
     life_names = _life_names(life_list_arg, lifers)
@@ -872,6 +876,7 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
 
     hits: dict[str, int] = defaultdict(int)
     last_seen: dict[str, tuple[datetime, str]] = {}
+    hour_hits: dict[str, list[int]] = defaultdict(lambda: [0] * 24)
     with _fetch_batch(len(in_window)):
         for c in in_window:
             checklist = api_get(
@@ -880,9 +885,10 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
             # /product/lists returns date-only obsDt ("8 Sep 2026"); the
             # checklist-view payload has "YYYY-MM-DD HH:MM" when the observer
             # recorded a start time.
-            obs_dt = (checklist.get("obsDt") if checklist.get("obsTimeValid")
-                      else c["obsDt"])
+            time_valid = bool(checklist.get("obsTimeValid"))
+            obs_dt = checklist.get("obsDt") if time_valid else c["obsDt"]
             obs_key = _parse_dt(obs_dt)
+            hour = obs_key.hour if time_valid else None
             seen_in_this = set()
             for o in checklist.get("obs", []) or []:
                 code = o.get("speciesCode")
@@ -893,6 +899,8 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
                 if name in seen_names:
                     continue
                 hits[code] += 1
+                if hour is not None:
+                    hour_hits[code][hour] += 1
                 prev = last_seen.get(code)
                 if prev is None or obs_key > prev[0]:
                     last_seen[code] = (obs_key, obs_dt)
@@ -918,8 +926,12 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
         err=True,
     )
     click.echo("")
-    click.echo("  Pct   N  Bkt  Last            Species")
-    click.echo("  ----  --  ---  ------------    -----------------")
+    if no_times:
+        click.echo("  Pct   N  Bkt  Last            Species")
+        click.echo("  ----  --  ---  ------------    -----------------")
+    else:
+        click.echo("  Pct   N  Bkt  Last            Times 5a-8p       Species")
+        click.echo("  ----  --  ---  ------------    ----------------  -----------------")
     rows = sorted(
         hits.items(),
         key=lambda kv: (-kv[1], code_to_name.get(kv[0], kv[0])),
@@ -942,7 +954,16 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
             last = dt.strftime(fmt)
         else:
             last = ""
-        click.echo(f"  {pct:>3}%  {n:>2}  {bkt_s}  {last:<12}    {marker} {name}")
+        if no_times:
+            click.echo(
+                f"  {pct:>3}%  {n:>2}  {bkt_s}  {last:<12}    {marker} {name}"
+            )
+        else:
+            spark = _times_sparkline(hour_hits[code])
+            click.echo(
+                f"  {pct:>3}%  {n:>2}  {bkt_s}  {last:<12}    "
+                f"{spark}  {marker} {name}"
+            )
 
 LEAVING_WEEKS_AHEAD = 4
 LEAVING_MIN_NOW = 2       # current bucket must be at least this
@@ -1026,6 +1047,21 @@ def _leaving_codes(
     if not quiet:
         click.echo(_leaving_legend(region), err=True)
     return out
+
+def _times_sparkline(counts_24: list[int]) -> str:
+    """Render hours 5..20 (16 chars) of a 24-length count array. '.' for 0,
+    '1'-'9' for the count, '+' for 10+. Observations outside 5a-8p are folded
+    onto the nearest edge cell so nothing is lost silently."""
+    if len(counts_24) != 24:
+        return "." * 16
+    def cell(n: int) -> str:
+        return "." if n == 0 else (str(n) if n < 10 else "+")
+    edge_left = sum(counts_24[h] for h in range(0, 5))
+    edge_right = sum(counts_24[h] for h in range(21, 24))
+    hourly = [counts_24[h] for h in range(5, 21)]
+    hourly[0] += edge_left
+    hourly[-1] += edge_right
+    return "".join(cell(c) for c in hourly)
 
 def _current_bin() -> int:
     """eBird bar-chart bin index for today. 48 bins/year, 4 per month."""
@@ -1328,10 +1364,12 @@ def favs_list() -> None:
 @click.option("--fresh", is_flag=True, default=False,
               help="Bypass the /product/lists cache to pick up checklists "
                    "submitted since the last run (default TTL is 1 hour).")
+@click.option("--no-times", is_flag=True, default=False,
+              help="Skip the 'Times 5a-8p' hour-of-day sparkline column.")
 def favs_deepdive(seen_list_arg: str | None,
                   back: int, fast: bool, leaving_region: str | None,
                   life_list_arg: str | None, lifers: bool,
-                  fresh: bool) -> None:
+                  fresh: bool, no_times: bool) -> None:
     """Run deepdive on every favorite hotspot."""
     existing = _load_favorites()
     if not existing:
@@ -1343,7 +1381,7 @@ def favs_deepdive(seen_list_arg: str | None,
         click.echo("=" * 70, err=True)
         try:
             _run_deepdive(loc, seen_list_arg, back, fast, leaving_region,
-                          life_list_arg, lifers, fresh)
+                          life_list_arg, lifers, fresh, no_times)
         except click.ClickException as e:
             click.echo(f"(skipped {loc}: {e.message})", err=True)
 
