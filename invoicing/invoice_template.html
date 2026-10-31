@@ -22,7 +22,7 @@
   table.items tbody tr.sum td { background: none; padding: 5pt 8pt; text-align: right; }
   .num { text-align: right; white-space: nowrap; }
   td.date { white-space: nowrap; }
-  td.desc { white-space: pre-line; }
+  td.desc .entry + .entry { margin-top: 4pt; }
   table.items tbody tr.sum-first td { padding-top: 12pt; border-top: 1px solid #999; }
   table.items tbody tr.sum-gap td { padding-top: 24pt; }
   table.items tbody tr.grand td { font-weight: bold; }
@@ -68,7 +68,7 @@
       {% for i in items %}
       <tr>
         <td class="date">{{ i.date_str }}</td>
-        <td class="desc">{{ i.description }}</td>
+        <td class="desc">{% for line in i.description.splitlines() %}<div class="entry">{{ line }}</div>{% endfor %}</td>
         <td class="num">{{ "%.2f"|format(i.hours) }}</td>
       </tr>
       {% endfor %}
@@ -95,6 +95,7 @@
     </tbody>
   </table>
 
+  {% if show_payment_details %}
   <h2>Payment Details</h2>
   <div class="payment">
     <div><strong>Preferred Payment Method:</strong> {{ payment.method }}</div>
@@ -106,5 +107,6 @@
       {% for line in payment.bank_address_lines %}<div>{{ line }}</div>{% endfor %}
     </div>
   </div>
+  {% endif %}
 </body>
 </html>

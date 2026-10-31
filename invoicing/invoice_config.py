@@ -55,6 +55,7 @@ class Invoice:
     gst_note: str
     hours_csv: Path
     items: list[LineItem]
+    show_payment_details: bool = True
 
     @property
     def total_hours(self) -> float:
@@ -112,6 +113,7 @@ def load_invoice(path: str | Path) -> Invoice:
         gst_note=data["gst"]["note"],
         hours_csv=hours_csv,
         items=load_items(hours_csv, rate),
+        show_payment_details=data.get("show_payment_details", True),
     )
 
 

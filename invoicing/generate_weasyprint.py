@@ -100,6 +100,7 @@ def build(invoice_path: str, out_path: str) -> None:
         currency=inv.currency,
         gst_note=inv.gst_note,
         payment=cfg.PAYMENT,
+        show_payment_details=inv.show_payment_details,
     )
 
     HTML(string=html, base_url=str(Path(__file__).parent)).write_pdf(out_path)

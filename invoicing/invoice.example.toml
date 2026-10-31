@@ -22,6 +22,9 @@ hours_csv = "hours.csv"
 hourly_rate = 150.00
 currency = "USD"
 
+# Set to false to omit the Payment Details section. Defaults to true.
+show_payment_details = true
+
 [billing_period]
 start = 2026-07-01
 end = 2026-07-31
