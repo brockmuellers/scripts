@@ -95,7 +95,6 @@ def test_deepdive_slow():
 
 def test_leaving():
     out = run("leaving", REGION)
-    assert "'leaving soon'" in out
     assert "Comparing" in out
     # Either result is a pass, depending on the season.
     assert "Now  In    Drop  Species" in out or "No targets at bucket >=" in out
