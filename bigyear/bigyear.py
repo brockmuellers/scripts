@@ -119,16 +119,40 @@ def api_get(path: str, params: dict | None = None, ttl: int = CACHE_TTL):
 _BARCHART_ROW_RE = re.compile(
     r'data-species-code="([a-z0-9]+)".*?</tr>', re.DOTALL,
 )
-_BARCHART_BIN_RE = re.compile(r'<div class="(sp|b[1-9])"></div>')
+_BARCHART_BIN_RE = re.compile(r'<div class="(sp|bu|b[1-9])"></div>')
 
-def barchart_get(region: str, years_back: int = 5) -> dict[str, list[int]]:
-    """Return {speciesCode: [48 bucket ints 0-9]} for region.
+def _parse_barchart(html: str) -> dict[str, list[int | None]]:
+    """{speciesCode: 48 weekly buckets} from eBird's bar-chart HTML.
+
+    Bucket 0 = not reported, 1-9 = increasing frequency, None = eBird's
+    "insufficient data" cell (too few checklists that week to say).
+    """
+    result: dict[str, list[int | None]] = {}
+    skipped = 0
+    for m in _BARCHART_ROW_RE.finditer(html):
+        cells = _BARCHART_BIN_RE.findall(m.group(0))
+        if len(cells) != 48:
+            skipped += 1
+            continue
+        result[m.group(1)] = [
+            0 if c == "sp" else None if c == "bu" else int(c[1:])
+            for c in cells
+        ]
+    if skipped:
+        click.echo(
+            f"Warning: skipped {skipped} bar-chart row(s) without 48 bins — "
+            f"eBird may have added a new cell type.", err=True,
+        )
+    return result
+
+def barchart_get(region: str, years_back: int = 5) -> dict[str, list[int | None]]:
+    """Return {speciesCode: 48 weekly buckets} for region (see _parse_barchart).
 
     Scrapes ebird.org's undocumented bar-chart HTML page (the one behind
-    the site's bar charts). 48 half-month bins per year, 4 per month.
-    Bucket 0 = absent, 1-9 = increasing frequency (eBird's own scale;
-    exact frequency-% cutoffs aren't published). Not part of the
-    documented v2 API — treat as best-effort. Requires EBIRD_SESSION.
+    the site's bar charts). 48 bins per year, 4 per month; eBird calls
+    them weeks. 1-9 is eBird's own frequency scale; exact cutoffs aren't
+    published. Not part of the documented v2 API — treat as best-effort.
+    Requires EBIRD_SESSION.
     """
     year = datetime.now().year
     req = httpx.Request(
@@ -162,18 +186,7 @@ def barchart_get(region: str, years_back: int = 5) -> dict[str, list[int]]:
             f"bar chart (often transient, or this location may not support one)."
         )
     html = resp.text
-    result: dict[str, list[int]] = {}
-    for m in _BARCHART_ROW_RE.finditer(html):
-        code = m.group(1)
-        bins = [0 if b == "sp" else int(b[1:])
-                for b in _BARCHART_BIN_RE.findall(m.group(0))]
-        # eBird sometimes emits 47 bins (dropping the last Dec half-month);
-        # pad with 0 to keep 48-bin indexing valid.
-        if len(bins) == 47:
-            bins.append(0)
-        if len(bins) != 48:
-            continue  # skip anything with unexpected structure (header row etc)
-        result[code] = bins
+    result = _parse_barchart(html)
     if not result:
         _cache_path(url + "#raw").write_text(html)
         looks_like_login = (
@@ -696,8 +709,8 @@ def targets(region: str, seen_list_arg: str | None,
         click.echo(_lifer_legend(life_names), err=True)
     now_bin = _current_bin()
     count = AVG_BINS[avg_window]
-    scores = {code: _mean_forward(bins, now_bin, count)
-              for code, bins in bc.items() if bins}
+    scores = {code: score for code, bins in bc.items()
+              if (score := _mean_forward(bins, now_bin, count)) is not None}
     ranked = sorted(
         state["targets"],
         key=lambda c: (-scores.get(c, 0.0), state["code_to_name"].get(c, c)),
@@ -811,7 +824,7 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
             if name in seen_names:
                 continue
             bkt = _mean_window(bins, now_bin, 1)
-            if bkt <= 0:
+            if not bkt:  # no data, or not reported this week
                 continue
             rows_fast.append((code, name, bkt))
         rows_fast.sort(key=lambda r: (-r[2], r[1]))
@@ -877,6 +890,7 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
     hits: dict[str, int] = defaultdict(int)
     last_seen: dict[str, tuple[datetime, str]] = {}
     hour_hits: dict[str, list[int]] = defaultdict(lambda: [0] * 24)
+    hour_checklists: list[int] = [0] * 24
     with _fetch_batch(len(in_window)):
         for c in in_window:
             checklist = api_get(
@@ -889,6 +903,8 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
             obs_dt = checklist.get("obsDt") if time_valid else c["obsDt"]
             obs_key = _parse_dt(obs_dt)
             hour = obs_key.hour if time_valid else None
+            if hour is not None:
+                hour_checklists[hour] += 1
             seen_in_this = set()
             for o in checklist.get("obs", []) or []:
                 code = o.get("speciesCode")
@@ -925,13 +941,27 @@ def _run_deepdive(locid: str, seen_list_arg: str | None,
         f"but reported recently).",
         err=True,
     )
+    if not no_times:
+        click.echo(
+            "Times 5a-8p (16 hourly cells): '.' = 0, digit = # of checklists "
+            "reporting the species, '+' = 10+. The sparkline in the header "
+            "row shows total checklist coverage per hour across the window.",
+            err=True,
+        )
     click.echo("")
     if no_times:
-        click.echo("  Pct   N  Bkt  Last            Species")
+        click.echo("  Pct    N  Bkt  Last            Species")
         click.echo("  ----  --  ---  ------------    -----------------")
     else:
-        click.echo("  Pct   N  Bkt  Last            Times 5a-8p       Species")
-        click.echo("  ----  --  ---  ------------    ----------------  -----------------")
+        coverage = _times_sparkline(hour_checklists)
+        click.echo("                                 Times 5a-8p")
+        click.echo(
+            f"  Pct    N  Bkt  Last            {coverage}  Species"
+        )
+        click.echo(
+            "  ----  --  ---  ------------    ----------------  "
+            "-----------------"
+        )
     rows = sorted(
         hits.items(),
         key=lambda kv: (-kv[1], code_to_name.get(kv[0], kv[0])),
@@ -989,20 +1019,22 @@ def _leaving_legend(region: str) -> str:
         f"Bar chart: {datetime.now().year - 5}-{datetime.now().year}."
     )
 
-def _rare_codes(bc: dict[str, list[int]]) -> set[str]:
+def _rare_codes(bc: dict[str, list[int | None]]) -> set[str]:
     """Species codes with mean bucket around 'now' <= RARE_BUCKET_MAX."""
     now_bin = _current_bin()
     return {
         code for code, values in bc.items()
-        if _mean_window(values, now_bin, 1) <= RARE_BUCKET_MAX
+        if (bkt := _mean_window(values, now_bin, 1)) is not None
+        and bkt <= RARE_BUCKET_MAX
     }
 
-def _rare_year_codes(bc: dict[str, list[int]]) -> set[str]:
+def _rare_year_codes(bc: dict[str, list[int | None]]) -> set[str]:
     """Species codes whose peak 5-year-averaged bucket across all 48 bins
     is <= RARE_YEAR_BUCKET_MAX (never common in any season)."""
     return {
         code for code, values in bc.items()
-        if values and max(values) <= RARE_YEAR_BUCKET_MAX
+        if max((v for v in values if v is not None), default=0)
+        <= RARE_YEAR_BUCKET_MAX
     }
 
 def _rare_legend(include_now: bool = True) -> str:
@@ -1021,7 +1053,7 @@ def _rare_legend(include_now: bool = True) -> str:
     )
 
 def _leaving_codes(
-    region: str, bc: dict[str, list[int]] | None = None, quiet: bool = False,
+    region: str, bc: dict[str, list[int | None]] | None = None, quiet: bool = False,
 ) -> set[str]:
     """Species codes currently 'here now, gone soon' in REGION.
 
@@ -1042,26 +1074,33 @@ def _leaving_codes(
     for code, values in bc.items():
         now_b = _mean_window(values, now_bin, 1)
         future_b = _mean_window(values, ahead_bin, 1)
+        if now_b is None or future_b is None:
+            continue
         if now_b >= LEAVING_MIN_NOW and (now_b - future_b) >= LEAVING_MIN_DROP:
             out.add(code)
     if not quiet:
         click.echo(_leaving_legend(region), err=True)
     return out
 
-def _times_sparkline(counts_24: list[int]) -> str:
-    """Render hours 5..20 (16 chars) of a 24-length count array. '.' for 0,
-    '1'-'9' for the count, '+' for 10+. Observations outside 5a-8p are folded
-    onto the nearest edge cell so nothing is lost silently."""
-    if len(counts_24) != 24:
-        return "." * 16
-    def cell(n: int) -> str:
-        return "." if n == 0 else (str(n) if n < 10 else "+")
-    edge_left = sum(counts_24[h] for h in range(0, 5))
-    edge_right = sum(counts_24[h] for h in range(21, 24))
-    hourly = [counts_24[h] for h in range(5, 21)]
+def _fold_hours(arr: list[int]) -> list[int]:
+    """Fold a 24-length hourly array to 16 cells for 5a-8p; obs outside
+    5a-8p spill onto the nearest edge cell so nothing is lost."""
+    edge_left = sum(arr[h] for h in range(0, 5))
+    edge_right = sum(arr[h] for h in range(21, 24))
+    hourly = [arr[h] for h in range(5, 21)]
     hourly[0] += edge_left
     hourly[-1] += edge_right
-    return "".join(cell(c) for c in hourly)
+    return hourly
+
+def _sparkline_cell(n: int) -> str:
+    return "." if n == 0 else (str(n) if n < 10 else "+")
+
+def _times_sparkline(counts_24: list[int]) -> str:
+    """Render hours 5..20 (16 chars) of a 24-length count array.
+    '.' for 0, '1'-'9' for the count, '+' for 10+."""
+    if len(counts_24) != 24:
+        return "." * 16
+    return "".join(_sparkline_cell(c) for c in _fold_hours(counts_24))
 
 def _current_bin() -> int:
     """eBird bar-chart bin index for today. 48 bins/year, 4 per month."""
@@ -1074,21 +1113,20 @@ def _bin_label(b: int) -> str:
     week_starts = (1, 8, 15, 22)
     return f"{datetime(2000, month, 1).strftime('%b')} {week_starts[b % 4]}+"
 
-def _mean_window(values: list[float], center: int, radius: int) -> float:
+def _mean_known(picks: list[int | None]) -> float | None:
+    """Mean of the bins that have data; None if none do."""
+    known = [p for p in picks if p is not None]
+    return sum(known) / len(known) if known else None
+
+def _mean_window(values: list[int | None], center: int, radius: int) -> float | None:
     """Mean of values around center, wrapping around the 48-bin year."""
     n = len(values)
-    if not n:
-        return 0.0
-    picks = [values[(center + i) % n] for i in range(-radius, radius + 1)]
-    return sum(picks) / len(picks)
+    return _mean_known([values[(center + i) % n] for i in range(-radius, radius + 1)])
 
-def _mean_forward(values: list[float], start: int, count: int) -> float:
+def _mean_forward(values: list[int | None], start: int, count: int) -> float | None:
     """Mean of `count` bins starting at `start`, wrapping the 48-bin year."""
     n = len(values)
-    if not n or count <= 0:
-        return 0.0
-    picks = [values[(start + i) % n] for i in range(count)]
-    return sum(picks) / len(picks)
+    return _mean_known([values[(start + i) % n] for i in range(count)])
 
 @cli.command()
 @click.argument("region")
@@ -1127,6 +1165,8 @@ def leaving(region: str, seen_list_arg: str | None,
             continue
         now_b = _mean_window(values, now_bin, 1)
         future_b = _mean_window(values, ahead_bin, 1)
+        if now_b is None or future_b is None:
+            continue
         if now_b < min_now:
             continue
         if (now_b - future_b) < min_drop:
